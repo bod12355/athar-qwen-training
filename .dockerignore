@@ -1,0 +1,6 @@
+.git
+.gitignore
+checkpoints/
+*.bak
+__pycache__/
+*.pyc

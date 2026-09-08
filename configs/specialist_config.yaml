@@ -7,7 +7,7 @@ strict: false
 chat_template: qwen3
 
 datasets:
-  - path: /workspace/data/athar/train_specialist.jsonl
+  - path: /workspace/data/athar/data/train_specialist.jsonl
     ds_type: json
     split: train
     type: chat_template
@@ -16,7 +16,7 @@ datasets:
     train_on_eos: turn
 
 test_datasets:
-  - path: /workspace/data/athar/validation_specialist.jsonl
+  - path: /workspace/data/athar/data/validation_specialist.jsonl
     ds_type: json
     split: train
     type: chat_template
@@ -53,7 +53,7 @@ lora_o_kernel: true
 
 micro_batch_size: 1
 gradient_accumulation_steps: 8
-num_epochs: 2
+num_epochs: 3
 
 optimizer: adamw_torch_4bit
 lr_scheduler: cosine

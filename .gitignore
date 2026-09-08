@@ -1,0 +1,7 @@
+*.bak
+__pycache__/
+*.pyc
+outputs/
+prepared/
+prepared_meta/
+prepared_specialist/

@@ -1,6 +1,7 @@
 import os
 import glob
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -53,7 +54,7 @@ not_primary_when لا يعني الاستبعاد التلقائي، لكنه ي
 - التشخيص المؤسسي مقابل التخطيط الاستراتيجي.
 - التحول والتغيير مقابل الجودة.
 
-أعد JSON صالحًا فقط:
+أعد JSON صالحًا فقط، واجعل reason جملة واحدة لا تتجاوز 18 كلمة ولا تسرد أسماء المجالات:
 {"relevant": true/false, "score": 0.0, "reason": "سبب عربي قصير ومحدد مستند إلى واقعة من المدخل"}
 
 التقدير:
@@ -67,7 +68,7 @@ not_primary_when لا يعني الاستبعاد التلقائي، لكنه ي
 MATCHER_BASE_MODEL = "Qwen/Qwen3-14B"
 MATCHER_BATCH_SIZE = int(os.environ.get("MATCHER_BATCH_SIZE", "2"))
 MATCHER_MAX_INPUT_TOKENS = int(os.environ.get("MATCHER_MAX_INPUT_TOKENS", "8192"))
-MATCHER_MAX_NEW_TOKENS = int(os.environ.get("MATCHER_MAX_NEW_TOKENS", "180"))
+MATCHER_MAX_NEW_TOKENS = int(os.environ.get("MATCHER_MAX_NEW_TOKENS", "96"))
 MATCHER_MIN_RELEVANT_SCORE = float(os.environ.get("MATCHER_MIN_RELEVANT_SCORE", "0.35"))
 
 _MATCHER_MODEL = None
@@ -533,6 +534,74 @@ def extract_json_object(text):
     )
 
 
+
+def parse_candidate_output(text):
+
+    # First try strict JSON parsing.
+    try:
+        return extract_json_object(text)
+    except ValueError:
+        pass
+
+    # Robust fallback for truncated/repetitive generations:
+    # recover the classification and score even if "reason" was not closed.
+    relevant_match = re.search(
+        r'"relevant"\s*:\s*(true|false)',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    score_match = re.search(
+        r'"score"\s*:\s*(-?\d+(?:\.\d+)?)',
+        text,
+    )
+
+    reason_match = re.search(
+        r'"reason"\s*:\s*"([^"]*)',
+        text,
+        flags=re.DOTALL,
+    )
+
+    if relevant_match is None or score_match is None:
+        raise ValueError(
+            f"Could not recover matcher classification. Raw output: {text[:500]}"
+        )
+
+    relevant = (
+        relevant_match.group(1).lower() == "true"
+    )
+
+    score = float(
+        score_match.group(1)
+    )
+
+    reason = ""
+
+    if reason_match is not None:
+        reason = re.sub(
+            r"\s+",
+            " ",
+            reason_match.group(1),
+        ).strip()
+
+        # Keep a runaway unfinished reason from polluting the API.
+        words = reason.split()
+
+        if len(words) > 24:
+            reason = " ".join(words[:24]).rstrip("،,.") + "."
+
+    if not reason:
+        reason = (
+            "تم استرجاع التصنيف والدرجة من استجابة غير مكتملة."
+        )
+
+    return {
+        "relevant": relevant,
+        "score": score,
+        "reason": reason,
+    }
+
+
 def normalize_candidate_result(
     advisor_id,
     raw_result,
@@ -617,6 +686,8 @@ def evaluate_advisor_batch(
             **encoded,
             max_new_tokens=MATCHER_MAX_NEW_TOKENS,
             do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=8,
             eos_token_id=_MATCHER_TOKENIZER.eos_token_id,
             pad_token_id=_MATCHER_TOKENIZER.pad_token_id,
             use_cache=True,
@@ -638,7 +709,7 @@ def evaluate_advisor_batch(
         advisors,
         texts,
     ):
-        parsed = extract_json_object(
+        parsed = parse_candidate_output(
             text
         )
 

@@ -37,20 +37,36 @@ MATCHER_PROMPT_REL = "prompts/matcher_system_prompt_v2.md"
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
-        "checkpoint_rel": "checkpoints/base",
+        "source_checkpoint_rel": "checkpoints/base",
+        "target_checkpoint_rel": "checkpoints/base",
         "output_dir": f"{ROOT}/outputs/qwen3-14b-athar-qlora",
+        "resume": True,
     },
 
     "meta": {
         "config": f"{ROOT}/configs/meta_config.yaml",
-        "checkpoint_rel": "checkpoints/meta",
+        "source_checkpoint_rel": "checkpoints/meta",
+        "target_checkpoint_rel": "checkpoints/meta",
         "output_dir": f"{ROOT}/outputs/qwen3-14b-athar-meta-qlora",
+        "resume": True,
     },
 
     "specialist": {
         "config": f"{ROOT}/configs/specialist_config.yaml",
-        "checkpoint_rel": "checkpoints/specialist",
+        "source_checkpoint_rel": "checkpoints/specialist",
+        "target_checkpoint_rel": "checkpoints/specialist",
         "output_dir": f"{ROOT}/outputs/qwen3-14b-athar-specialist-qlora",
+        "resume": True,
+    },
+
+    # New task:
+    # Start from Meta adapter weights, but train as a NEW task/run.
+    "matcher": {
+        "config": f"{ROOT}/configs/matcher_config.yaml",
+        "source_checkpoint_rel": "checkpoints/meta",
+        "target_checkpoint_rel": "checkpoints/matcher",
+        "output_dir": f"{ROOT}/outputs/qwen3-14b-athar-matcher-qlora",
+        "resume": False,
     },
 }
 
@@ -118,7 +134,7 @@ def clone_repo_without_lfs(token):
 
     env = os.environ.copy()
 
-    # Clone text/config files, but do not download all LFS checkpoints.
+    # Clone normal files but skip all heavy LFS files initially.
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
 
@@ -139,7 +155,9 @@ def clone_repo_without_lfs(token):
     return repo_dir, env
 
 
-def clone_checkpoint(training_type, token):
+def clone_source_checkpoint(training_type, token):
+
+    info = RUNS[training_type]
 
     repo_dir, env = clone_repo_without_lfs(token)
 
@@ -149,15 +167,15 @@ def clone_checkpoint(training_type, token):
         env=env,
     )
 
-    checkpoint_rel = RUNS[training_type]["checkpoint_rel"]
+    source_checkpoint_rel = info["source_checkpoint_rel"]
 
-    # Download only the selected checkpoint.
+    # Download only the source adapter needed for this run.
     run_command(
         [
             "git",
             "lfs",
             "pull",
-            f"--include={checkpoint_rel}/**",
+            f"--include={source_checkpoint_rel}/**",
             "--exclude=",
         ],
         cwd=repo_dir,
@@ -166,7 +184,7 @@ def clone_checkpoint(training_type, token):
 
     checkpoint_path = os.path.join(
         repo_dir,
-        checkpoint_rel
+        source_checkpoint_rel
     )
 
     adapter_file = os.path.join(
@@ -252,8 +270,8 @@ def load_matcher_assets(repo_dir):
 
 def normalize_advisory_input(raw_input):
 
-    # Prefer a real JSON object, but accept a JSON string
-    # temporarily for backend compatibility.
+    # Prefer a real JSON object, but temporarily accept
+    # a JSON string for backend compatibility.
     if isinstance(raw_input, str):
         try:
             raw_input = json.loads(raw_input)
@@ -312,10 +330,70 @@ def advisory_match_preflight(job_input, token):
         "matcher_prompt_chars": len(matcher_prompt),
         "note": (
             "Matcher assets and request schema are valid. "
-            "Actual ranking is intentionally disabled until "
-            "the matcher adapter is trained."
+            "Actual ranking remains disabled until the "
+            "matcher adapter is trained."
         ),
     }
+
+
+def validate_training_files(training_type):
+
+    info = RUNS[training_type]
+
+    if not os.path.exists(info["config"]):
+        raise RuntimeError(
+            f"Config not found: {info['config']}"
+        )
+
+    extra = {}
+
+    if training_type == "matcher":
+
+        train_path = f"{ROOT}/data/train_matcher_v1.jsonl"
+        validation_path = f"{ROOT}/data/validation_matcher_v1.jsonl"
+
+        if not os.path.exists(train_path):
+            raise RuntimeError(
+                f"Matcher train dataset not found: {train_path}"
+            )
+
+        if not os.path.exists(validation_path):
+            raise RuntimeError(
+                f"Matcher validation dataset not found: {validation_path}"
+            )
+
+        def count_jsonl(path):
+            count = 0
+            with open(path, "r", encoding="utf-8") as f:
+                for line_number, line in enumerate(f, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            f"Invalid JSONL in {path} at line "
+                            f"{line_number}: {exc}"
+                        )
+
+                    if not isinstance(row.get("messages"), list):
+                        raise RuntimeError(
+                            f"Missing messages list in {path} "
+                            f"at line {line_number}"
+                        )
+
+                    count += 1
+
+            return count
+
+        extra = {
+            "train_samples": count_jsonl(train_path),
+            "validation_samples": count_jsonl(validation_path),
+            "train_dataset": train_path,
+            "validation_dataset": validation_path,
+        }
+
+    return extra
 
 
 def latest_checkpoint(output_dir):
@@ -347,11 +425,13 @@ def push_checkpoint(
     env,
 ):
 
-    checkpoint_rel = RUNS[training_type]["checkpoint_rel"]
+    target_checkpoint_rel = RUNS[training_type][
+        "target_checkpoint_rel"
+    ]
 
     destination = os.path.join(
         repo_dir,
-        checkpoint_rel
+        target_checkpoint_rel
     )
 
     shutil.rmtree(
@@ -390,7 +470,7 @@ def push_checkpoint(
         [
             "git",
             "add",
-            checkpoint_rel,
+            target_checkpoint_rel,
         ],
         cwd=repo_dir,
         env=env,
@@ -446,6 +526,48 @@ def push_checkpoint(
     return commit_sha
 
 
+def training_preflight(
+    training_type,
+    checkpoint_path,
+):
+
+    info = RUNS[training_type]
+
+    adapter_file = os.path.join(
+        checkpoint_path,
+        "adapter_model.safetensors"
+    )
+
+    extra = validate_training_files(
+        training_type
+    )
+
+    response = {
+        "status": "training_preflight_ok",
+        "training_type": training_type,
+        "config": info["config"],
+        "resume_mode": info["resume"],
+        "source_checkpoint": checkpoint_path,
+        "target_checkpoint_rel": info["target_checkpoint_rel"],
+        "adapter_size_mb": round(
+            os.path.getsize(adapter_file) / 1024 / 1024,
+            2
+        ),
+    }
+
+    response.update(extra)
+
+    if training_type == "matcher":
+        response["note"] = (
+            "Matcher will initialize from the Meta adapter "
+            "using lora_model_dir and will start a NEW "
+            "optimizer/scheduler state. It will NOT use "
+            "--resume-from-checkpoint."
+        )
+
+    return response
+
+
 def handler(job):
 
     token = os.environ.get("GITHUB_TOKEN")
@@ -464,7 +586,7 @@ def handler(job):
 
     request_type = job_input.get("type")
 
-    # New Athar OS matching route.
+    # Runtime request route.
     if request_type == "advisory_match":
 
         if not job_input.get("preflight", False):
@@ -475,7 +597,7 @@ def handler(job):
                 "error": (
                     "The advisory_match API route is wired, "
                     "but actual ranking is disabled until the "
-                    "new matcher adapter is trained."
+                    "matcher adapter is trained."
                 ),
             }
 
@@ -484,7 +606,7 @@ def handler(job):
             token,
         )
 
-    # Existing training route remains unchanged.
+    # Training route.
     training_type = job_input.get(
         "training_type"
     )
@@ -494,7 +616,7 @@ def handler(job):
             "error": (
                 "Provide type='advisory_match' "
                 "or training_type must be "
-                "base, meta, or specialist."
+                "base, meta, specialist, or matcher."
             )
         }
 
@@ -505,31 +627,32 @@ def handler(job):
         flush=True
     )
 
-    repo_dir, checkpoint_path, git_env = clone_checkpoint(
+    repo_dir, checkpoint_path, git_env = clone_source_checkpoint(
         training_type,
         token,
     )
 
     print(
-        f"Checkpoint: {checkpoint_path}",
+        f"Source checkpoint: {checkpoint_path}",
         flush=True
     )
 
     if job_input.get("preflight", False):
-        adapter_file = os.path.join(
+        return training_preflight(
+            training_type,
             checkpoint_path,
-            "adapter_model.safetensors"
         )
 
-        return {
-            "status": "preflight_ok",
-            "training_type": training_type,
-            "checkpoint": checkpoint_path,
-            "adapter_size_mb": round(
-                os.path.getsize(adapter_file) / 1024 / 1024,
-                2
-            ),
-        }
+    validate_training_files(
+        training_type
+    )
+
+    # Avoid stale output if the same worker processes another run.
+    if training_type == "matcher":
+        shutil.rmtree(
+            info["output_dir"],
+            ignore_errors=True
+        )
 
     os.makedirs(
         info["output_dir"],
@@ -540,11 +663,18 @@ def handler(job):
         "axolotl",
         "train",
         info["config"],
-        "--resume-from-checkpoint",
-        checkpoint_path,
     ]
 
-    # Optional override for future continuation runs.
+    # base/meta/specialist continue the same training run.
+    # matcher starts a new task from Meta LoRA weights via lora_model_dir.
+    if info["resume"]:
+        command.extend(
+            [
+                "--resume-from-checkpoint",
+                checkpoint_path,
+            ]
+        )
+
     requested_epochs = job_input.get("num_epochs")
 
     if requested_epochs is not None:
@@ -565,6 +695,11 @@ def handler(job):
 
     print(
         f"Starting {training_type} training...",
+        flush=True
+    )
+
+    print(
+        "Command: " + " ".join(command),
         flush=True
     )
 
@@ -595,6 +730,7 @@ def handler(job):
         "checkpoint": os.path.basename(
             new_checkpoint
         ),
+        "saved_to": info["target_checkpoint_rel"],
         "github_commit": commit_sha,
         "log_tail": training_tail[-4000:],
     }

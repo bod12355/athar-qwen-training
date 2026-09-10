@@ -3,6 +3,7 @@ import glob
 import json
 import shutil
 import subprocess
+import time
 from collections import deque
 
 import runpod
@@ -32,6 +33,30 @@ GIT_USER_EMAIL = os.environ.get(
 
 MATCHER_REGISTRY_REL = "advisors/advisors_registry_v2.json"
 MATCHER_PROMPT_REL = "prompts/matcher_system_prompt_v2.md"
+
+# This is the exact per-candidate instruction used to build train_matcher_v1.jsonl.
+MATCHER_CANDIDATE_SYSTEM_PROMPT = """أنت Athar OS Advisor Candidate Matcher.
+مهمتك تقييم مستشار واحد فقط مقابل بيانات منظمة وبرامجها.
+لا تقدم الاستشارة ولا تقارن بين عدة مستشارين.
+أعد JSON صالحًا فقط بالحقول:
+relevant: true/false
+score: رقم من 0 إلى 1
+reason: سبب عربي قصير ومحدد مستند إلى بيانات المنظمة.
+اعتبر activation_conditions دليلًا قويًا، وscope_boundaries حدًا ملزمًا.
+not_primary_when لا يعني الاستبعاد التلقائي؛ قد يبقى المستشار مناسبًا كمساند إذا كانت له قيمة مادية واضحة.
+إذا كانت الصلة هامشية أو لا توجد حاجة مدعومة بالمدخل، اجعل relevant=false.
+"""
+
+MATCHER_BASE_MODEL = "Qwen/Qwen3-14B"
+MATCHER_BATCH_SIZE = int(os.environ.get("MATCHER_BATCH_SIZE", "2"))
+MATCHER_MAX_INPUT_TOKENS = int(os.environ.get("MATCHER_MAX_INPUT_TOKENS", "8192"))
+MATCHER_MAX_NEW_TOKENS = int(os.environ.get("MATCHER_MAX_NEW_TOKENS", "180"))
+MATCHER_MIN_RELEVANT_SCORE = float(os.environ.get("MATCHER_MIN_RELEVANT_SCORE", "0.35"))
+
+_MATCHER_MODEL = None
+_MATCHER_TOKENIZER = None
+_MATCHER_REGISTRY = None
+_MATCHER_DEVICE = None
 
 
 RUNS = {
@@ -118,9 +143,7 @@ def run_command(cmd, cwd=None, env=None, stream=False):
     return result.stdout
 
 
-def clone_repo_without_lfs(token):
-
-    repo_dir = "/tmp/athar_training_repo"
+def clone_repo_without_lfs(token, repo_dir="/tmp/athar_training_repo"):
 
     shutil.rmtree(
         repo_dir,
@@ -268,6 +291,443 @@ def load_matcher_assets(repo_dir):
     return registry, matcher_prompt
 
 
+
+def clone_matcher_checkpoint(token):
+
+    repo_dir, env = clone_repo_without_lfs(
+        token,
+        repo_dir="/tmp/athar_inference_repo",
+    )
+
+    run_command(
+        ["git", "lfs", "install", "--local"],
+        cwd=repo_dir,
+        env=env,
+    )
+
+    checkpoint_rel = RUNS["matcher"]["target_checkpoint_rel"]
+
+    run_command(
+        [
+            "git",
+            "lfs",
+            "pull",
+            f"--include={checkpoint_rel}/**",
+            "--exclude=",
+        ],
+        cwd=repo_dir,
+        env=env,
+    )
+
+    checkpoint_path = os.path.join(
+        repo_dir,
+        checkpoint_rel,
+    )
+
+    adapter_file = os.path.join(
+        checkpoint_path,
+        "adapter_model.safetensors",
+    )
+
+    adapter_config = os.path.join(
+        checkpoint_path,
+        "adapter_config.json",
+    )
+
+    if not os.path.exists(adapter_file):
+        raise RuntimeError(
+            "Matcher adapter_model.safetensors was not downloaded."
+        )
+
+    if os.path.getsize(adapter_file) < 10_000_000:
+        raise RuntimeError(
+            "Matcher checkpoint appears to be a Git LFS pointer."
+        )
+
+    if not os.path.exists(adapter_config):
+        raise RuntimeError(
+            "Matcher adapter_config.json was not found."
+        )
+
+    return repo_dir, checkpoint_path
+
+
+def compact_candidate(advisor):
+
+    return {
+        "advisor_id": advisor.get("advisor_id"),
+        "name_ar": advisor.get("name_ar"),
+        "mission_summary": advisor.get("mission_summary", ""),
+        "core_scope": advisor.get("core_scope", []),
+        "activation_conditions": advisor.get("activation_conditions", []),
+        "not_primary_when": advisor.get("not_primary_when", []),
+        "scope_boundaries": advisor.get("scope_boundaries", ""),
+        "match_signals": advisor.get("match_signals", []),
+    }
+
+
+def ensure_matcher_model(token):
+
+    global _MATCHER_MODEL
+    global _MATCHER_TOKENIZER
+    global _MATCHER_REGISTRY
+    global _MATCHER_DEVICE
+
+    if (
+        _MATCHER_MODEL is not None
+        and _MATCHER_TOKENIZER is not None
+        and _MATCHER_REGISTRY is not None
+    ):
+        return
+
+    print(
+        "Loading matcher model and adapter...",
+        flush=True,
+    )
+
+    started = time.time()
+
+    import torch
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        BitsAndBytesConfig,
+    )
+    from peft import PeftModel
+
+    repo_dir, checkpoint_path = clone_matcher_checkpoint(
+        token
+    )
+
+    registry, _ = load_matcher_assets(
+        repo_dir
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        MATCHER_BASE_MODEL,
+        use_fast=True,
+    )
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    tokenizer.padding_side = "left"
+
+    compute_dtype = (
+        torch.bfloat16
+        if torch.cuda.is_available()
+        else torch.float32
+    )
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=compute_dtype,
+    )
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        MATCHER_BASE_MODEL,
+        quantization_config=quantization_config,
+        torch_dtype=compute_dtype,
+        device_map={"": 0},
+        attn_implementation="flash_attention_2",
+    )
+
+    model = PeftModel.from_pretrained(
+        base_model,
+        checkpoint_path,
+        is_trainable=False,
+    )
+
+    model.eval()
+
+    _MATCHER_MODEL = model
+    _MATCHER_TOKENIZER = tokenizer
+    _MATCHER_REGISTRY = registry
+    _MATCHER_DEVICE = next(model.parameters()).device
+
+    print(
+        f"Matcher ready in {round(time.time() - started, 2)}s",
+        flush=True,
+    )
+
+
+def build_candidate_prompt(
+    organization,
+    programs,
+    advisor,
+):
+
+    user_payload = {
+        "organization": organization,
+        "programs": programs,
+        "candidate_advisor": compact_candidate(advisor),
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": MATCHER_CANDIDATE_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                user_payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    return _MATCHER_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+
+def extract_json_object(text):
+
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = text.replace("```json", "", 1)
+        text = text.replace("```", "", 1).strip()
+
+    decoder = json.JSONDecoder()
+
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+
+        try:
+            obj, _ = decoder.raw_decode(
+                text[index:]
+            )
+
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(
+        f"Model did not return valid JSON. Raw output: {text[:500]}"
+    )
+
+
+def normalize_candidate_result(
+    advisor_id,
+    raw_result,
+):
+
+    relevant = raw_result.get("relevant", False)
+
+    if isinstance(relevant, str):
+        relevant = relevant.strip().lower() == "true"
+
+    relevant = bool(relevant)
+
+    try:
+        score = float(
+            raw_result.get("score", 0.0)
+        )
+    except (TypeError, ValueError):
+        score = 0.0
+
+    score = max(
+        0.0,
+        min(1.0, score),
+    )
+
+    reason = str(
+        raw_result.get("reason", "")
+    ).strip()
+
+    return {
+        "advisor_id": advisor_id,
+        "relevant": relevant,
+        "score": round(score, 4),
+        "reason": reason,
+    }
+
+
+def evaluate_advisor_batch(
+    prompts,
+    advisors,
+):
+
+    import torch
+
+    encoded = _MATCHER_TOKENIZER(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        add_special_tokens=False,
+    )
+
+    prompt_token_counts = encoded[
+        "attention_mask"
+    ].sum(dim=1).tolist()
+
+    too_long = [
+        {
+            "advisor_id": advisors[index]["advisor_id"],
+            "tokens": int(token_count),
+        }
+        for index, token_count in enumerate(
+            prompt_token_counts
+        )
+        if token_count > MATCHER_MAX_INPUT_TOKENS
+    ]
+
+    if too_long:
+        raise ValueError(
+            "Matcher input exceeds safe token limit: "
+            + json.dumps(
+                too_long,
+                ensure_ascii=False,
+            )
+        )
+
+    encoded = {
+        key: value.to(_MATCHER_DEVICE)
+        for key, value in encoded.items()
+    }
+
+    with torch.inference_mode():
+        output_ids = _MATCHER_MODEL.generate(
+            **encoded,
+            max_new_tokens=MATCHER_MAX_NEW_TOKENS,
+            do_sample=False,
+            eos_token_id=_MATCHER_TOKENIZER.eos_token_id,
+            pad_token_id=_MATCHER_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated_ids = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    texts = _MATCHER_TOKENIZER.batch_decode(
+        generated_ids,
+        skip_special_tokens=True,
+    )
+
+    results = []
+
+    for advisor, text in zip(
+        advisors,
+        texts,
+    ):
+        parsed = extract_json_object(
+            text
+        )
+
+        normalized = normalize_candidate_result(
+            advisor["advisor_id"],
+            parsed,
+        )
+
+        normalized["input_tokens"] = int(
+            prompt_token_counts[len(results)]
+        )
+
+        results.append(
+            normalized
+        )
+
+    return results
+
+
+def advisory_match_inference(
+    job_input,
+    token,
+):
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_matcher_model(
+        token
+    )
+
+    advisors = _MATCHER_REGISTRY["advisors"]
+
+    evaluations = []
+
+    for start in range(
+        0,
+        len(advisors),
+        MATCHER_BATCH_SIZE,
+    ):
+
+        batch_advisors = advisors[
+            start:start + MATCHER_BATCH_SIZE
+        ]
+
+        prompts = [
+            build_candidate_prompt(
+                organization,
+                programs,
+                advisor,
+            )
+            for advisor in batch_advisors
+        ]
+
+        print(
+            "Evaluating advisors: "
+            + ", ".join(
+                str(a["advisor_id"])
+                for a in batch_advisors
+            ),
+            flush=True,
+        )
+
+        batch_results = evaluate_advisor_batch(
+            prompts,
+            batch_advisors,
+        )
+
+        evaluations.extend(
+            batch_results
+        )
+
+    ranked = [
+        {
+            "advisor_id": row["advisor_id"],
+            "score": row["score"],
+            "reason": row["reason"],
+        }
+        for row in evaluations
+        if (
+            row["relevant"]
+            and row["score"] >= MATCHER_MIN_RELEVANT_SCORE
+        )
+    ]
+
+    ranked.sort(
+        key=lambda row: row["score"],
+        reverse=True,
+    )
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": len(evaluations),
+        "ranked": ranked,
+    }
+
+    if job_input.get("debug", False):
+        response["evaluations"] = evaluations
+
+    return response
+
+
 def normalize_advisory_input(raw_input):
 
     # Prefer a real JSON object, but temporarily accept
@@ -330,8 +790,8 @@ def advisory_match_preflight(job_input, token):
         "matcher_prompt_chars": len(matcher_prompt),
         "note": (
             "Matcher assets and request schema are valid. "
-            "Actual ranking remains disabled until the "
-            "matcher adapter is trained."
+            "Matcher assets and request schema are valid. "
+            "The trained matcher adapter is available for inference."
         ),
     }
 
@@ -589,19 +1049,13 @@ def handler(job):
     # Runtime request route.
     if request_type == "advisory_match":
 
-        if not job_input.get("preflight", False):
-            return {
-                "status": "matcher_not_trained_yet",
-                "type": "advisory_match",
-                "run_id": job_input.get("run_id"),
-                "error": (
-                    "The advisory_match API route is wired, "
-                    "but actual ranking is disabled until the "
-                    "matcher adapter is trained."
-                ),
-            }
+        if job_input.get("preflight", False):
+            return advisory_match_preflight(
+                job_input,
+                token,
+            )
 
-        return advisory_match_preflight(
+        return advisory_match_inference(
             job_input,
             token,
         )

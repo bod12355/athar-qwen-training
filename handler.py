@@ -88,9 +88,9 @@ RUNS = {
     # Start from Meta adapter weights, but train as a NEW task/run.
     "matcher": {
         "config": f"{ROOT}/configs/matcher_config.yaml",
-        "source_checkpoint_rel": "checkpoints/meta",
+        "source_checkpoint_rel": "checkpoints/matcher",
         "target_checkpoint_rel": "checkpoints/matcher",
-        "output_dir": f"{ROOT}/outputs/qwen3-14b-athar-matcher-qlora",
+        "output_dir": f"{ROOT}/outputs/qwen3-14b-athar-matcher-v2-qlora",
         "resume": False,
     },
 }
@@ -809,8 +809,8 @@ def validate_training_files(training_type):
 
     if training_type == "matcher":
 
-        train_path = f"{ROOT}/data/train_matcher_v1.jsonl"
-        validation_path = f"{ROOT}/data/validation_matcher_v1.jsonl"
+        train_path = f"{ROOT}/data/train_matcher_v2.jsonl"
+        validation_path = f"{ROOT}/data/validation_matcher_v2.jsonl"
 
         if not os.path.exists(train_path):
             raise RuntimeError(
@@ -1019,7 +1019,7 @@ def training_preflight(
 
     if training_type == "matcher":
         response["note"] = (
-            "Matcher will initialize from the Meta adapter "
+            "Matcher v2 will refine the existing matcher adapter "
             "using lora_model_dir and will start a NEW "
             "optimizer/scheduler state. It will NOT use "
             "--resume-from-checkpoint."
@@ -1120,7 +1120,7 @@ def handler(job):
     ]
 
     # base/meta/specialist continue the same training run.
-    # matcher starts a new task from Meta LoRA weights via lora_model_dir.
+    # matcher v2 refines the current matcher LoRA weights via lora_model_dir.
     if info["resume"]:
         command.extend(
             [

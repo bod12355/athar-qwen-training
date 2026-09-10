@@ -19,4 +19,5 @@ COPY configs/ ./configs/
 COPY data/ ./data/
 COPY handler.py ./handler.py
 
+LABEL athar.redeploy="2026-09-10-v2"
 ENTRYPOINT ["/workspace/axolotl-venv/bin/python", "-u", "/workspace/data/athar/handler.py"]

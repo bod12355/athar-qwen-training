@@ -346,6 +346,22 @@ def handler(job):
         flush=True
     )
 
+if job_input.get("preflight", False):
+    adapter_file = os.path.join(
+        checkpoint_path,
+        "adapter_model.safetensors"
+    )
+
+    return {
+        "status": "preflight_ok",
+        "training_type": training_type,
+        "checkpoint": checkpoint_path,
+        "adapter_size_mb": round(
+            os.path.getsize(adapter_file) / 1024 / 1024,
+            2
+        ),
+    }
+    
     os.makedirs(
         info["output_dir"],
         exist_ok=True

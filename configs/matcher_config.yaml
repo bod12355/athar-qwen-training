@@ -7,7 +7,7 @@ strict: false
 chat_template: qwen3
 
 datasets:
-  - path: /workspace/data/athar/data/train_matcher_v1.jsonl
+  - path: /workspace/data/athar/data/train_matcher_v2.jsonl
     ds_type: json
     split: train
     type: chat_template
@@ -16,7 +16,7 @@ datasets:
     train_on_eos: turn
 
 test_datasets:
-  - path: /workspace/data/athar/data/validation_matcher_v1.jsonl
+  - path: /workspace/data/athar/data/validation_matcher_v2.jsonl
     ds_type: json
     split: train
     type: chat_template
@@ -25,20 +25,18 @@ test_datasets:
     train_on_eos: turn
 
 dataset_exact_deduplication: true
-dataset_prepared_path: /workspace/data/athar/prepared_matcher
-output_dir: /workspace/data/athar/outputs/qwen3-14b-athar-matcher-qlora
+dataset_prepared_path: /workspace/data/athar/prepared_matcher_v2
+output_dir: /workspace/data/athar/outputs/qwen3-14b-athar-matcher-v2-qlora
 
-sequence_len: 2048
+sequence_len: 4096
 sample_packing: true
 eval_sample_packing: false
 
 load_in_4bit: true
 adapter: qlora
 
-# Important:
-# Start the matcher from the existing Meta adapter weights,
-# but start a NEW optimizer/scheduler state for the new matching task.
-lora_model_dir: /tmp/athar_training_repo/checkpoints/meta
+# Refine the trained matcher checkpoint with new balanced/report-style data.
+lora_model_dir: /tmp/athar_training_repo/checkpoints/matcher
 
 lora_r: 16
 lora_alpha: 32
@@ -62,7 +60,7 @@ num_epochs: 2
 
 optimizer: adamw_torch_4bit
 lr_scheduler: cosine
-learning_rate: 0.00005
+learning_rate: 0.00002
 warmup_ratio: 0.1
 weight_decay: 0.0
 

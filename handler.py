@@ -1,5 +1,6 @@
 import os
 import glob
+import json
 import shutil
 import subprocess
 from collections import deque
@@ -28,6 +29,9 @@ GIT_USER_EMAIL = os.environ.get(
     "GIT_USER_EMAIL",
     "da02.bod@gmail.com"
 )
+
+MATCHER_REGISTRY_REL = "advisors/advisors_registry_v2.json"
+MATCHER_PROMPT_REL = "prompts/matcher_system_prompt_v2.md"
 
 
 RUNS = {
@@ -98,7 +102,7 @@ def run_command(cmd, cwd=None, env=None, stream=False):
     return result.stdout
 
 
-def clone_checkpoint(training_type, token):
+def clone_repo_without_lfs(token):
 
     repo_dir = "/tmp/athar_training_repo"
 
@@ -114,7 +118,7 @@ def clone_checkpoint(training_type, token):
 
     env = os.environ.copy()
 
-    # Don't download all 755 MB of LFS files.
+    # Clone text/config files, but do not download all LFS checkpoints.
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
 
@@ -131,6 +135,13 @@ def clone_checkpoint(training_type, token):
         ],
         env=env,
     )
+
+    return repo_dir, env
+
+
+def clone_checkpoint(training_type, token):
+
+    repo_dir, env = clone_repo_without_lfs(token)
 
     run_command(
         ["git", "lfs", "install", "--local"],
@@ -176,6 +187,135 @@ def clone_checkpoint(training_type, token):
         )
 
     return repo_dir, checkpoint_path, env
+
+
+def load_matcher_assets(repo_dir):
+
+    registry_path = os.path.join(
+        repo_dir,
+        MATCHER_REGISTRY_REL
+    )
+
+    prompt_path = os.path.join(
+        repo_dir,
+        MATCHER_PROMPT_REL
+    )
+
+    if not os.path.exists(registry_path):
+        raise RuntimeError(
+            f"Matcher registry not found: {MATCHER_REGISTRY_REL}"
+        )
+
+    if not os.path.exists(prompt_path):
+        raise RuntimeError(
+            f"Matcher prompt not found: {MATCHER_PROMPT_REL}"
+        )
+
+    with open(
+        registry_path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+        registry = json.load(f)
+
+    with open(
+        prompt_path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+        matcher_prompt = f.read()
+
+    advisors = registry.get("advisors")
+
+    if not isinstance(advisors, list):
+        raise RuntimeError(
+            "Matcher registry field 'advisors' must be a list."
+        )
+
+    if len(advisors) != 16:
+        raise RuntimeError(
+            f"Expected 16 advisors, found {len(advisors)}."
+        )
+
+    advisor_ids = [
+        advisor.get("advisor_id")
+        for advisor in advisors
+    ]
+
+    if advisor_ids != list(range(1, 17)):
+        raise RuntimeError(
+            f"Advisor IDs must be 1..16. Found: {advisor_ids}"
+        )
+
+    return registry, matcher_prompt
+
+
+def normalize_advisory_input(raw_input):
+
+    # Prefer a real JSON object, but accept a JSON string
+    # temporarily for backend compatibility.
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"advisory_match input is not valid JSON: {exc}"
+            )
+
+    if not isinstance(raw_input, dict):
+        raise ValueError(
+            "advisory_match input must be a JSON object."
+        )
+
+    organization = raw_input.get("organization")
+    programs = raw_input.get("programs", [])
+
+    if not isinstance(organization, dict):
+        raise ValueError(
+            "input.organization must be a JSON object."
+        )
+
+    if not isinstance(programs, list):
+        raise ValueError(
+            "input.programs must be a JSON array."
+        )
+
+    return organization, programs
+
+
+def advisory_match_preflight(job_input, token):
+
+    repo_dir, _ = clone_repo_without_lfs(token)
+
+    registry, matcher_prompt = load_matcher_assets(
+        repo_dir
+    )
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    advisors = registry["advisors"]
+
+    return {
+        "status": "matcher_preflight_ok",
+        "type": "advisory_match",
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "programs_count": len(programs),
+        "advisors_count": len(advisors),
+        "advisor_ids": [
+            advisor["advisor_id"]
+            for advisor in advisors
+        ],
+        "registry_version": registry.get("version"),
+        "matcher_prompt_chars": len(matcher_prompt),
+        "note": (
+            "Matcher assets and request schema are valid. "
+            "Actual ranking is intentionally disabled until "
+            "the matcher adapter is trained."
+        ),
+    }
 
 
 def latest_checkpoint(output_dir):
@@ -317,6 +457,34 @@ def handler(job):
 
     job_input = job.get("input", {})
 
+    if not isinstance(job_input, dict):
+        return {
+            "error": "RunPod input must be a JSON object."
+        }
+
+    request_type = job_input.get("type")
+
+    # New Athar OS matching route.
+    if request_type == "advisory_match":
+
+        if not job_input.get("preflight", False):
+            return {
+                "status": "matcher_not_trained_yet",
+                "type": "advisory_match",
+                "run_id": job_input.get("run_id"),
+                "error": (
+                    "The advisory_match API route is wired, "
+                    "but actual ranking is disabled until the "
+                    "new matcher adapter is trained."
+                ),
+            }
+
+        return advisory_match_preflight(
+            job_input,
+            token,
+        )
+
+    # Existing training route remains unchanged.
     training_type = job_input.get(
         "training_type"
     )
@@ -324,8 +492,9 @@ def handler(job):
     if training_type not in RUNS:
         return {
             "error": (
-                "training_type must be "
-                "base, meta, or specialist"
+                "Provide type='advisory_match' "
+                "or training_type must be "
+                "base, meta, or specialist."
             )
         }
 
@@ -361,7 +530,7 @@ def handler(job):
                 2
             ),
         }
-    
+
     os.makedirs(
         info["output_dir"],
         exist_ok=True

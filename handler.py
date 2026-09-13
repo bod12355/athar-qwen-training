@@ -1,4 +1,4 @@
-import os
+
 import glob
 import json
 import re
@@ -922,7 +922,7 @@ def advisory_match_rich_v9(job_input):
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v13_validated_needs",
+        "routing_engine": "rich_ai_v15_1_payload_contract",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -2148,6 +2148,458 @@ def advisory_match_rich_v13(job_input):
         response["matching_raw_output"] = match_raw
 
     return response
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v15
+# Pass 1: discover needs without advisors.
+# Pass 2: validate needs without advisors.
+# Pass 3: globally propose advisors for validated needs.
+# Pass 4: adversarial ownership review of proposed advisors.
+# ---------------------------------------------------------------------
+
+RICH_V15_REVIEW_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V15_REVIEW_MAX_NEW_TOKENS", "850")
+)
+
+RICH_V15_REVIEW_PROMPT = """أنت Athar OS Advisor Relevance Adjudicator.
+
+ستستلم:
+1) FACTS موثقة.
+2) VALIDATED_NEEDS مؤكدة.
+3) PROPOSED_MATCHES من مرحلة مطابقة أولية.
+4) ملفات Expert DNA للمستشارين المقترحين.
+
+هدفك ليس تقليل العدد، وليس اختيار "أقل عدد كافٍ".
+هدفك الوحيد: الاحتفاظ بكل مستشار مرتبط فعلاً وبشكل مادي باحتياجات الجمعية المؤكدة، واستبعاد العلاقات العامة أو الافتراضية.
+
+قاعدة KEEP:
+احتفظ بالمستشار إذا كان لديه دور مباشر أو مساند مادي في معالجة واحد أو أكثر من VALIDATED_NEEDS، وكانت مساهمته واضحة من owned_outcome / core_scope / activation_when.
+
+مهم:
+- يمكن أن يحتفظ أكثر من مستشار لنفس الاحتياج إذا كانت مساهمة كل واحد مختلفة فعلاً ومادية.
+- لا تسقط مستشارًا فقط لأن مستشارًا آخر أكثر تخصصًا.
+- لا يوجد حد أدنى أو أقصى لعدد المستشارين.
+- لا تطبق Minimum Expert Principle.
+- لا تحاول جعل القائمة قصيرة.
+- لا تحاول جعل القائمة كبيرة.
+- المعيار الوحيد هو: هل هذا المستشار related فعلاً للاحتياج الحالي؟
+
+DROP إذا:
+- العلاقة عامة أو بعيدة أو من الدرجة الثانية.
+- السبب هو فقط أن "هذا المجال مفيد عادة".
+- يلزم اختراع فجوة أو مشكلة غير موجودة في VALIDATED_NEEDS.
+- مساهمة المستشار لا تضيف شيئًا ماديًا للاحتياج الحالي.
+- المستشار مرتبط فقط بموضوع قريب لغويًا وليس بنطاق عمله الحقيقي.
+
+قواعد تمييز مهمة:
+- إدارة المحفظة/الأولويات/الاعتماديات قد ترتبط مباشرة بـ13.
+  ويمكن أن يرتبط 1 أو 8 أو 10 فقط إذا كان نفس الاحتياج يتضمن فعلًا قرارًا تنفيذيًا، مفاضلة استراتيجية، أو معمار أهداف يحتاج مساهمتهم.
+- التخطيط التشغيلي/المواسم/الجداول/الموارد يرتبط مباشرة بـ12.
+  ويمكن أن يرتبط 13 إذا كانت هناك اعتماديات بين البرامج أو توزيع موارد على مستوى المحفظة.
+  ولا يرتبط 5 إلا إذا كان هناك تبنٍ/مقاومة/تحول فعلي.
+  ولا يرتبط 7 إلا إذا كان هناك خطر/استمرارية/تعطل فعلي.
+- 14 يحتاج احتياجًا متعلقًا بالـKPI/القياس/الخط الأساس/المستهدفات/اللوحات.
+- 15 يحتاج احتياجًا متعلقًا بالتقييم/الأثر/النتائج/التعلم.
+- 16 يحتاج احتياجًا متعلقًا بالحوكمة/الامتثال/الصلاحيات/السياسات.
+- 6 يحتاج احتياجًا متعلقًا بالجودة/المعايير/التحسين.
+- 11 يحتاج احتياجًا متعلقًا بتصميم/إعادة تصميم مبادرة أو Pilot.
+- 4 يحتاج احتياجًا متعلقًا بأصحاب المصلحة/الشراكات.
+- 3 يحتاج احتياجًا متعلقًا بالتحليل البيئي/الاتجاهات/المقارنة.
+- 2 يحتاج احتياجًا متعلقًا بالتشخيص/النضج/الجاهزية.
+- 9 يحتاج احتياجًا متعلقًا بالهوية/الرؤية/الرسالة/القيم.
+
+اختبار سريع لكل مستشار:
+1) هل يوجد VALIDATED_NEED يطابق نطاقه فعلاً؟
+2) هل يستطيع تقديم مخرج أو قرار أو تحسين مادي لهذا الاحتياج؟
+3) هل السبب مدعوم بالوقائع دون افتراض إضافي؟
+
+إذا نعم بوضوح => KEEP.
+إذا لا => DROP.
+
+أخرج سطرًا لكل مستشار مقترح:
+ADVISOR_ID|KEEP_OR_DROP|FINAL_SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
+
+KEEP_OR_DROP = KEEP أو DROP
+FINAL_SCORE من 0 إلى 100
+ROLE = core أو supporting أو none
+MATCHED_NEED_IDS من VALIDATED_NEEDS فقط
+EVIDENCE_IDS من FACTS فقط، 1-3 عند KEEP، ويمكن - عند DROP
+REASON جملة عربية قصيرة توضّح صلة المستشار الفعلية بالاحتياج
+
+إذا KEEP:
+- FINAL_SCORE >= 40
+- يجب وجود matched_need_ids
+- يجب وجود evidence_ids
+
+إذا DROP:
+- FINAL_SCORE < 40
+- ROLE = none
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح خارج السطور.
+"""
+
+
+def generate_rich_v15_review(
+    facts,
+    validated_needs,
+    proposed_matches,
+    proposed_advisors,
+):
+    import torch
+
+    messages = [
+        {
+            "role": "system",
+            "content": RICH_V15_REVIEW_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "facts": facts,
+                    "validated_needs": validated_needs,
+                    "proposed_matches": proposed_matches,
+                    "advisor_profiles": proposed_advisors,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(
+        encoded["attention_mask"].sum().item()
+    )
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v15 review input too long: {input_tokens}"
+        )
+
+    encoded = {
+        k: v.to(_RICH_DEVICE)
+        for k, v in encoded.items()
+    }
+
+    print(
+        f"Rich v15 ownership review input tokens: {input_tokens}",
+        flush=True,
+    )
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V15_REVIEW_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    raw_text = _RICH_TOKENIZER.decode(
+        generated[0],
+        skip_special_tokens=True,
+    )
+
+    return raw_text, input_tokens
+
+
+def _parse_v15_review(
+    text,
+    proposed_ids,
+    valid_need_ids,
+    valid_fact_ids,
+):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    kept = []
+    decisions = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 6)
+        if len(parts) != 7:
+            continue
+
+        (
+            advisor_raw,
+            decision_raw,
+            score_raw,
+            role_raw,
+            needs_raw,
+            evidence_raw,
+            reason_raw,
+        ) = [p.strip() for p in parts]
+
+        a_m = re.search(r"\d+", advisor_raw)
+        s_m = re.search(r"\d+(?:\.\d+)?", score_raw)
+
+        if not a_m or not s_m:
+            continue
+
+        advisor_id = int(a_m.group())
+
+        if advisor_id not in proposed_ids:
+            continue
+
+        decision = decision_raw.upper()
+        if decision not in {"KEEP", "DROP"}:
+            continue
+
+        score = float(s_m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        role = role_raw.lower()
+        if role not in {"core", "supporting", "none"}:
+            role = "none" if decision == "DROP" else "supporting"
+
+        matched_need_ids = []
+        if needs_raw != "-":
+            for token in re.split(r"[,،;\s]+", needs_raw):
+                token = token.strip().upper()
+                if token in valid_need_ids and token not in matched_need_ids:
+                    matched_need_ids.append(token)
+
+        evidence_ids = []
+        if evidence_raw != "-":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+        evidence_ids = evidence_ids[:3]
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        final_decision = decision
+
+        if decision == "KEEP":
+            if score < 40 or not matched_need_ids or not evidence_ids:
+                final_decision = "DROP"
+                role = "none"
+            else:
+                if role == "none":
+                    role = "supporting"
+
+                kept.append({
+                    "advisor_id": advisor_id,
+                    "score": round(score / 100.0, 4),
+                    "role": role,
+                    "matched_need_ids": matched_need_ids,
+                    "evidence_ids": evidence_ids,
+                    "reason": reason,
+                })
+
+        decisions[advisor_id] = {
+            "decision": final_decision,
+            "score": round(score / 100.0, 4),
+            "role": role,
+            "matched_need_ids": matched_need_ids,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+    kept.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return kept, decisions
+
+
+def advisory_match_rich_v15(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        f["fact_id"]
+        for f in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    # Pass 1: need discovery
+    print(
+        "Rich v15 pass 1/4: discovering needs without advisors...",
+        flush=True,
+    )
+
+    needs_raw, needs_tokens = generate_rich_v12_needs(
+        facts
+    )
+
+    candidate_needs = _parse_v12_needs(
+        needs_raw,
+        valid_fact_ids,
+    )
+
+    # Pass 2: need validation
+    print(
+        f"Rich v15 pass 2/4: validating {len(candidate_needs)} candidate needs...",
+        flush=True,
+    )
+
+    if candidate_needs:
+        need_review_raw, need_review_tokens = generate_rich_v13_need_review(
+            facts,
+            candidate_needs,
+        )
+
+        validated_needs, need_review_decisions = _parse_v13_need_review(
+            need_review_raw,
+            candidate_needs,
+            valid_fact_ids,
+        )
+    else:
+        need_review_raw = "NONE"
+        need_review_tokens = 0
+        validated_needs = []
+        need_review_decisions = {}
+
+    # Pass 3: broad global matching proposal
+    if validated_needs:
+        print(
+            "Rich v15 pass 3/4: proposing advisors globally...",
+            flush=True,
+        )
+
+        proposal_raw, proposal_tokens = generate_rich_v13_matches(
+            facts,
+            validated_needs,
+            advisors,
+        )
+
+        proposed_matches = _parse_v12_matches(
+            proposal_raw,
+            set(range(1, 17)),
+            {n["need_id"] for n in validated_needs},
+            valid_fact_ids,
+        )
+    else:
+        proposal_raw = "NONE"
+        proposal_tokens = 0
+        proposed_matches = []
+
+    # Pass 4: ownership adjudication
+    if proposed_matches:
+        proposed_ids = {
+            int(item["advisor_id"])
+            for item in proposed_matches
+        }
+
+        advisor_by_number = {
+            int(advisor["advisor_id"]): advisor
+            for advisor in advisors
+        }
+
+        proposed_profiles = [
+            advisor_by_number[i]
+            for i in sorted(proposed_ids)
+        ]
+
+        print(
+            f"Rich v15 pass 4/4: ownership review of {len(proposed_matches)} proposed advisors...",
+            flush=True,
+        )
+
+        ownership_raw, ownership_tokens = generate_rich_v15_review(
+            facts,
+            validated_needs,
+            proposed_matches,
+            proposed_profiles,
+        )
+
+        kept_internal, ownership_decisions = _parse_v15_review(
+            ownership_raw,
+            proposed_ids,
+            {n["need_id"] for n in validated_needs},
+            valid_fact_ids,
+        )
+    else:
+        advisor_by_number = {
+            int(advisor["advisor_id"]): advisor
+            for advisor in advisors
+        }
+        ownership_raw = "NONE"
+        ownership_tokens = 0
+        kept_internal = []
+        ownership_decisions = {}
+
+    # Registered IDs in final output
+    ranked = []
+
+    for item in kept_internal:
+        number = int(item["advisor_id"])
+        advisor = advisor_by_number[number]
+
+        ranked.append({
+            "advisor_id": advisor.get(
+                "system_code",
+                str(number),
+            ),
+            "advisor_name": advisor.get(
+                "name_ar",
+                advisor.get("name_en"),
+            ),
+            "score": item["score"],
+            "role": item["role"],
+            "matched_need_ids": item["matched_need_ids"],
+            "evidence_ids": item["evidence_ids"],
+            "reason": item["reason"],
+        })
+
+    # External API contract: keep the response payload minimal and stable.
+    # Internal routing still uses needs, roles, evidence, and review stages,
+    # but clients receive only advisor_id, score, and reason.
+    public_ranked = [
+        {
+            "advisor_id": item["advisor_id"],
+            "score": item["score"],
+            "reason": item["reason"],
+        }
+        for item in ranked
+    ]
+
+    return {
+        "ranked": public_ranked
+    }
 
 
 RUNS = {
@@ -4089,7 +4541,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v13(
+        return advisory_match_rich_v15(
             job_input
         )
 

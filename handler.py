@@ -145,7 +145,7 @@ low
 ROUTING_SYSTEM_PROMPT = """أنت محرك توجيه المستشارين في Athar OS.
 
 ستستلم:
-1) GROUNDED_NEEDS: احتياجات مستخرجة مسبقًا، وكل حاجة مرتبطة بأدلة.
+1) GROUNDED_NEEDS: احتياجات أو فرص أو تعقيدات موثقة، وكل واحدة مرتبطة بأدلة.
 2) ADVISORS: ملفات التوجيه للمستشارين.
 
 قيّم جميع المستشارين معًا، وليس كل مستشار بمعزل عن الآخرين.
@@ -1288,35 +1288,222 @@ def normalize_grounded_needs(
     return normalized
 
 
-def extract_grounded_advisory_needs(
-    organization,
-    programs,
-):
 
-    facts = build_grounded_facts(
-        organization,
-        programs,
-    )
+def _text_blob(organization, programs):
+    parts = []
+    for field in [
+        "name", "type", "sector", "short_description",
+        "detailed_description", "competitive_advantage", "important_notes",
+    ]:
+        value = organization.get(field)
+        if value:
+            if isinstance(value, (list, dict)):
+                value = json.dumps(value, ensure_ascii=False)
+            parts.append(str(value))
 
-    raw, input_tokens, raw_text = generate_json_with_router(
-        NEEDS_SYSTEM_PROMPT,
-        {
-            "organization_name": organization.get("name"),
-            "facts": facts,
-        },
-        ROUTER_NEEDS_MAX_NEW_TOKENS,
-    )
+    activity_fields = organization.get("activity_fields", [])
+    if activity_fields:
+        parts.append(json.dumps(activity_fields, ensure_ascii=False))
 
-    needs = normalize_grounded_needs(
-        raw.get("needs", []),
-        facts,
-    )
+    for program in programs:
+        if not isinstance(program, dict):
+            continue
+        for field in [
+            "name", "type", "description",
+            "target_audience", "beneficiary_value", "delivery_method",
+        ]:
+            value = program.get(field)
+            if value:
+                parts.append(str(value))
+
+    return " ".join(parts)
+
+
+def _contains_any(text, terms):
+    return any(term in text for term in terms)
+
+
+def extract_grounded_advisory_needs(organization, programs):
+    """
+    v6: deterministic, evidence-first signal extraction.
+    No LLM is allowed to decide whether the organization has "a need".
+    This prevents annual-report language from collapsing to needs=[].
+    """
+
+    facts = build_grounded_facts(organization, programs)
+    fact_map = {f["fact_id"]: f for f in facts}
+    blob = _text_blob(organization, programs)
+    blob_lower = blob.lower()
+    signals = []
+
+    def add_signal(signal_type, statement, evidence_ids, priority):
+        valid = [eid for eid in evidence_ids if eid in fact_map]
+        if not valid:
+            return
+        if any(x.get("signal_type") == signal_type for x in signals):
+            return
+
+        signals.append({
+            "need_id": f"N{len(signals) + 1}",
+            "need": statement,
+            "kind": "advisory_opportunity",
+            "priority": priority,
+            "signal_type": signal_type,
+            "evidence_ids": valid,
+            "evidence": [
+                {
+                    "fact_id": eid,
+                    "source": fact_map[eid]["source"],
+                    "text": fact_map[eid]["text"],
+                }
+                for eid in valid
+            ],
+        })
+
+    # 1) Portfolio/program complexity is directly observable.
+    program_count = len(programs)
+    if program_count >= 6:
+        ids = [f"P{i}" for i in range(1, min(program_count, 6) + 1)]
+        add_signal(
+            "portfolio_complexity",
+            f"وجود {program_count} برنامجًا/مبادرة متنوعة يخلق تعقيدًا ماديًا في إدارة المحفظة والبرامج والأولويات والمنافع والتنسيق بينها.",
+            ids,
+            "high" if program_count >= 10 else "medium",
+        )
+
+    # 2) Seasonal / time-bound operational complexity.
+    seasonal_terms = [
+        "موسم", "موسمية", "رمضان", "الحج", "حاج", "الحجاج",
+        "ضيف الرحمن", "ضيوف الرحمن", "بداية العام الدراسي", "صيفي",
+    ]
+    seasonal_ids = []
+    for i, program in enumerate(programs, start=1):
+        ptext = " ".join(
+            str(program.get(k, ""))
+            for k in ["name", "description", "delivery_method"]
+        )
+        if _contains_any(ptext, seasonal_terms):
+            seasonal_ids.append(f"P{i}")
+
+    if len(seasonal_ids) >= 2:
+        add_signal(
+            "operational_coordination",
+            "وجود عدة برامج موسمية أو مقيدة بتوقيتات تنفيذية مختلفة يخلق حاجة مادية للتخطيط التشغيلي والتنسيق بين الجداول والملاك والموارد.",
+            seasonal_ids[:6],
+            "medium",
+        )
+
+    # 3) MEAL / impact only when explicit language exists.
+    meal_terms = [
+        "قياس الأثر", "إدارة الأثر", "الأثر الاجتماعي",
+        "تقييم الأثر", "نتائج البرامج", "نظرية التغيير",
+        "متابعة وتقييم", "المتابعة والتقييم", "meal",
+    ]
+    if _contains_any(blob_lower, [x.lower() for x in meal_terms]):
+        ids = [
+            f["fact_id"] for f in facts
+            if _contains_any(f["text"].lower(), [x.lower() for x in meal_terms])
+        ][:6]
+        add_signal(
+            "impact_measurement",
+            "توجد إشارة صريحة إلى قياس الأثر أو توجيه البرامج لدعمه، ما يبرر مراجعة إطار النتائج والتقييم والتعلم وقوة دليل الأثر.",
+            ids,
+            "high",
+        )
+
+    # 4) KPI only when explicit KPI/dashboard language exists.
+    kpi_terms = [
+        "مؤشرات الأداء", "مؤشر أداء", "kpi", "لوحة قيادة",
+        "dashboard", "خط الأساس", "المستهدفات", "مصدر بيانات",
+    ]
+    if _contains_any(blob_lower, [x.lower() for x in kpi_terms]):
+        ids = [
+            f["fact_id"] for f in facts
+            if _contains_any(f["text"].lower(), [x.lower() for x in kpi_terms])
+        ][:6]
+        add_signal(
+            "kpi_management",
+            "توجد إشارات صريحة إلى مؤشرات الأداء أو مصادرها أو خطوط الأساس أو لوحات القيادة، ما يبرر دعم منظومة KPI واتخاذ القرار.",
+            ids,
+            "high",
+        )
+
+    # 5) Governance: require an actual current gap/risk, not an achievement.
+    governance_terms = ["حوكمة", "امتثال", "صلاحيات", "سياسات", "إجراءات"]
+    gap_terms = [
+        "ضعف", "غياب", "غير واضح", "تعارض", "قصور",
+        "مخالفة", "عدم امتثال", "تحتاج", "بحاجة", "مطلوب",
+    ]
+    for fact in facts:
+        text = fact["text"]
+        if _contains_any(text, governance_terms) and _contains_any(text, gap_terms):
+            add_signal(
+                "governance_gap",
+                "توجد فجوة أو مخاطرة حوكمة/امتثال مذكورة صراحة وتحتاج ضبط الصلاحيات أو السياسات أو أدلة التطبيق.",
+                [fact["fact_id"]],
+                "high",
+            )
+            break
+
+    # 6) Change management: only on adoption/resistance evidence.
+    change_terms = [
+        "مقاومة التغيير", "ضعف التبني", "عدم التبني", "رفض النظام",
+        "صعوبة التغيير", "إدارة التغيير", "تحديات التبني",
+    ]
+    if _contains_any(blob, change_terms):
+        ids = [
+            f["fact_id"] for f in facts
+            if _contains_any(f["text"], change_terms)
+        ][:6]
+        add_signal(
+            "change_adoption",
+            "توجد إشارات صريحة إلى تحديات تبني أو مقاومة تغيير تتطلب إدارة تغيير منظمة.",
+            ids,
+            "high",
+        )
+
+    # 7) Strategy: require explicit strategic review/development language.
+    strategy_terms = [
+        "خطة استراتيجية", "استراتيجية", "أهداف استراتيجية",
+        "أولويات استراتيجية", "قضايا استراتيجية",
+    ]
+    strategy_action_terms = [
+        "تحديث", "مراجعة", "إعادة", "غير واضحة",
+        "تحتاج", "بحاجة", "مطلوب", "تطوير",
+    ]
+    for fact in facts:
+        text = fact["text"]
+        if _contains_any(text, strategy_terms) and _contains_any(text, strategy_action_terms):
+            add_signal(
+                "strategy",
+                "توجد حاجة أو فرصة استراتيجية صريحة تتعلق بمراجعة أو تطوير الاتجاه والأهداف والأولويات.",
+                [fact["fact_id"]],
+                "high",
+            )
+            break
+
+    # 8) Stakeholders / partnerships when explicitly present.
+    partnership_terms = [
+        "شراكات", "شركاء", "أصحاب المصلحة",
+        "الجهات المانحة", "مانحين",
+    ]
+    if _contains_any(blob, partnership_terms):
+        ids = [
+            f["fact_id"] for f in facts
+            if _contains_any(f["text"], partnership_terms)
+        ][:6]
+        add_signal(
+            "stakeholders_partnerships",
+            "توجد شراكات أو أطراف مصلحة متعددة بما يجعل إدارة العلاقة والقيمة المتبادلة مجالًا استشاريًا ماديًا.",
+            ids,
+            "medium",
+        )
 
     return {
-        "needs": needs,
+        "needs": signals[:8],
         "facts": facts,
-        "input_tokens": input_tokens,
-        "raw_text": raw_text,
+        "input_tokens": 0,
+        "raw_text": None,
     }
 
 
@@ -1542,7 +1729,7 @@ def advisory_match_grounded_v5(
     )
 
     print(
-        "Stage 1/2: extracting grounded advisory needs...",
+        "Stage 1/2: building deterministic grounded advisory signals...",
         flush=True,
     )
 
@@ -1554,7 +1741,7 @@ def advisory_match_grounded_v5(
     needs = extraction["needs"]
 
     print(
-        f"Grounded needs extracted: {len(needs)}",
+        f"Grounded advisory signals built: {len(needs)}",
         flush=True,
     )
 
@@ -1562,7 +1749,7 @@ def advisory_match_grounded_v5(
         response = {
             "status": "completed",
             "type": "advisory_match",
-            "routing_engine": "grounded_v5",
+            "routing_engine": "grounded_v6",
             "run_id": job_input.get("run_id"),
             "organization_name": organization.get("name"),
             "needs_count": 0,
@@ -1594,7 +1781,7 @@ def advisory_match_grounded_v5(
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "grounded_v5",
+        "routing_engine": "grounded_v6",
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
         "needs_count": len(needs),

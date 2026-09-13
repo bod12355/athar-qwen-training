@@ -922,7 +922,7 @@ def advisory_match_rich_v9(job_input):
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v12_need_first",
+        "routing_engine": "rich_ai_v13_validated_needs",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -1797,6 +1797,354 @@ def advisory_match_rich_v12(job_input):
 
     if job_input.get("debug", False):
         response["needs_raw_output"] = needs_raw
+        response["matching_raw_output"] = match_raw
+
+    return response
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v13
+# Pass 1: discover needs without advisors.
+# Pass 2: validate needs without advisors.
+# Pass 3: globally match all 16 advisors only to validated needs.
+# ---------------------------------------------------------------------
+
+RICH_V13_NEED_REVIEW_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V13_NEED_REVIEW_MAX_NEW_TOKENS", "650")
+)
+
+RICH_V13_NEED_REVIEW_PROMPT = """أنت Athar OS Need Validation Engine.
+
+ستستلم FACTS موثقة وCANDIDATE_NEEDS تم استخراجها دون رؤية المستشارين.
+راجع كل احتياج بصرامة، ومهمتك منع اختراع احتياجات غير موجودة.
+
+KEEP فقط إذا كان الاحتياج:
+1) مذكورًا صراحة كمشكلة/فجوة/مخاطرة/قرار/هدف تحسين.
+2) أو نتيجة مباشرة وواضحة لتعقيد ظاهر، مثل:
+   - كثرة وتنوع وتداخل البرامج => إدارة محفظة/أولويات/اعتماديات.
+   - اختلاف المواسم والجداول وطرق التنفيذ => تخطيط وتشغيل وتنسيق موارد.
+3) أو فرصة تحسين مادية واضحة جدًا لا تحتاج افتراض مشكلة جديدة.
+
+DROP إذا احتاج افتراضًا إضافيًا غير موجود في FACTS، أو استُخدمت فيه صياغات مثل:
+"قد يحتاج"، "ربما"، "يمكن أن يحتاج"، "يفضل"، "من المحتمل".
+
+قواعد خاصة:
+- ERP أو الأرشفة أو إعادة الهيكلة لا تثبت مشكلة تكامل/تبني/أداء.
+- تنوع البرامج لا يثبت تلقائيًا الحاجة إلى قياس أثر أو KPI أو إعادة تصميم مبادرات.
+- برامج ضيوف الرحمن لا تثبت الحاجة إلى منصة موحدة أو حوكمة جديدة.
+- ارتفاع الحوكمة أو وجود سياسات لا يثبت فجوة حوكمة.
+- نمو الإيرادات لا يثبت فجوة شراكات أو تحليل خارجي.
+- لا تنشئ احتياجًا جديدًا في المراجعة؛ فقط KEEP أو DROP.
+
+أخرج:
+NEED_ID|KEEP_OR_DROP|PRIORITY|EVIDENCE_IDS|REASON
+
+KEEP_OR_DROP = KEEP أو DROP
+PRIORITY = high أو medium أو low أو none
+EVIDENCE_IDS من FACTS فقط، 1-4 عند KEEP، ويمكن - عند DROP.
+REASON سبب عربي مختصر.
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+RICH_V13_MATCH_PROMPT = """أنت Athar OS Global Advisor Matching Engine v13.
+
+ستستلم:
+1) FACTS موثقة.
+2) VALIDATED_NEEDS تم اكتشافها ومراجعتها قبل رؤية المستشارين.
+3) ملفات Expert DNA الغنية للـ16 مستشارًا.
+
+قارن الـ16 جميعًا معًا وأخرج كل مستشار يملك قيمة مستقلة ومادية مرتبطة مباشرة بـ VALIDATED_NEEDS.
+
+قاعدة الملكية:
+لا يكفي أن "يساعد" المستشار. يجب أن يكون الاحتياج داخل owned_outcome أو core scope أو activation_when له بوضوح.
+إذا كان الاحتياج مملوكًا بوضوح لمستشار متخصص، لا تُضف مستشارًا أعم أو مجاورًا إلا إذا كان له مخرج مستقل مطلوب صراحة.
+
+أمثلة منع التوسّع:
+- "إدارة المحفظة/الأولويات/الاعتماديات بين البرامج" يطابق 13 مباشرة.
+  لا تضف 1 أو 8 أو 10 إلا إذا كان الاحتياج نفسه يتضمن قرارًا تنفيذيًا أو مفاضلة استراتيجية أو معمار أهداف.
+- "التخطيط التشغيلي/المواسم/الجداول/الموارد" يطابق 12 مباشرة.
+  لا تضف 5 إلا إذا كان هناك تغيير/مقاومة/انتقال فعلي.
+- 14 يحتاج احتياجًا صريحًا للـKPI/القياس/الخط الأساس/المستهدفات/اللوحات.
+- 15 يحتاج احتياجًا صريحًا للتقييم/الأثر/النتائج/التعلم.
+- 11 يحتاج احتياجًا صريحًا لتصميم/إعادة تصميم مبادرة أو Pilot.
+- 16 يحتاج احتياجًا صريحًا للحوكمة/الامتثال/الصلاحيات/السياسات أو فجوة تطبيق.
+- 7 يحتاج احتياجًا صريحًا للمخاطر/الاستمرارية/التعطل.
+- 6 يحتاج احتياجًا صريحًا للجودة/المعايير/الشكاوى/التحسين.
+- 3 يحتاج احتياجًا صريحًا للتحليل البيئي/الاتجاهات/المقارنة/عدم اليقين.
+- 4 يحتاج احتياجًا صريحًا لأصحاب المصلحة/الشراكات.
+- 8 يحتاج احتياجًا صريحًا لاستراتيجية/مراجعة/خيارات استراتيجية.
+- 2 يحتاج احتياجًا صريحًا للتشخيص/النضج/الجاهزية.
+- 1 يحتاج احتياجًا صريحًا لقرار تنفيذي متعدد الأبعاد أو نموذج تشغيل/ملكية/مفاضلة تنفيذية.
+- 9 يحتاج احتياجًا صريحًا للهوية/الرؤية/الرسالة/القيم.
+
+لا يوجد عدد ثابت.
+
+SCORE:
+90-100 = مالك مباشر ومحوري
+80-89 = قوي جدًا
+70-79 = واضح
+55-69 = supporting مستقل ومادي
+40-54 = محدود لكنه حقيقي
+أقل من 40 = لا تخرجه
+
+أخرج:
+ADVISOR_ID|SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
+
+ROLE = core أو supporting
+MATCHED_NEED_IDS من VALIDATED_NEEDS فقط
+EVIDENCE_IDS من FACTS فقط، 1-3
+REASON جملة عربية قصيرة ومحددة
+
+إذا لم يوجد أحد اكتب NONE.
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+def generate_rich_v13_need_review(facts, candidate_needs):
+    import torch
+
+    messages = [
+        {"role": "system", "content": RICH_V13_NEED_REVIEW_PROMPT},
+        {"role": "user", "content": json.dumps(
+            {"facts": facts, "candidate_needs": candidate_needs},
+            ensure_ascii=False
+        )},
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(encoded["attention_mask"].sum().item())
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(f"Rich v13 need review input too long: {input_tokens}")
+
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V13_NEED_REVIEW_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    return _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True), input_tokens
+
+
+def _parse_v13_need_review(text, candidate_needs, valid_fact_ids):
+    candidate_by_id = {n["need_id"]: n for n in candidate_needs}
+    cleaned = str(text).replace("```text", "").replace("```", "").strip()
+
+    validated = []
+    decisions = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+
+        need_raw, decision_raw, priority_raw, evidence_raw, reason_raw = [p.strip() for p in parts]
+        m = re.search(r"N\s*(\d+)", need_raw, flags=re.IGNORECASE)
+        if not m:
+            continue
+
+        need_id = f"N{int(m.group(1))}"
+        if need_id not in candidate_by_id:
+            continue
+
+        decision = decision_raw.upper()
+        if decision not in {"KEEP", "DROP"}:
+            continue
+
+        priority = priority_raw.lower()
+        if priority not in {"high", "medium", "low", "none"}:
+            priority = "none" if decision == "DROP" else candidate_by_id[need_id]["priority"]
+
+        evidence_ids = []
+        if evidence_raw != "-":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+        evidence_ids = evidence_ids[:4]
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        decisions[need_id] = {
+            "decision": decision,
+            "priority": priority,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+        if decision == "KEEP" and evidence_ids:
+            original = candidate_by_id[need_id]
+            validated.append({
+                "need_id": need_id,
+                "priority": priority if priority != "none" else original["priority"],
+                "evidence_ids": evidence_ids,
+                "need": original["need"],
+            })
+
+    return validated, decisions
+
+
+def generate_rich_v13_matches(facts, needs, advisors):
+    import torch
+
+    messages = [
+        {"role": "system", "content": RICH_V13_MATCH_PROMPT},
+        {"role": "user", "content": json.dumps(
+            {"facts": facts, "validated_needs": needs, "advisors": advisors},
+            ensure_ascii=False
+        )},
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(encoded["attention_mask"].sum().item())
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(f"Rich v13 matching input too long: {input_tokens}")
+
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V12_MATCH_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    return _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True), input_tokens
+
+
+def advisory_match_rich_v13(job_input):
+    organization, programs = normalize_advisory_input(job_input.get("input", {}))
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(organization, programs)
+    valid_fact_ids = {f["fact_id"] for f in facts}
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print("Rich v13 pass 1/3: discovering needs without advisors...", flush=True)
+    needs_raw, needs_tokens = generate_rich_v12_needs(facts)
+    candidate_needs = _parse_v12_needs(needs_raw, valid_fact_ids)
+
+    print(
+        f"Rich v13 pass 2/3: validating {len(candidate_needs)} candidate needs...",
+        flush=True,
+    )
+
+    if candidate_needs:
+        review_raw, review_tokens = generate_rich_v13_need_review(
+            facts, candidate_needs
+        )
+        validated_needs, need_decisions = _parse_v13_need_review(
+            review_raw, candidate_needs, valid_fact_ids
+        )
+    else:
+        review_raw = "NONE"
+        review_tokens = 0
+        validated_needs = []
+        need_decisions = {}
+
+    print(f"Rich v13 validated {len(validated_needs)} needs.", flush=True)
+
+    if validated_needs:
+        print("Rich v13 pass 3/3: globally matching all 16 advisors...", flush=True)
+        match_raw, match_tokens = generate_rich_v13_matches(
+            facts, validated_needs, advisors
+        )
+        internal_matches = _parse_v12_matches(
+            match_raw,
+            set(range(1, 17)),
+            {n["need_id"] for n in validated_needs},
+            valid_fact_ids,
+        )
+    else:
+        match_raw = "NONE"
+        match_tokens = 0
+        internal_matches = []
+
+    advisor_by_number = {
+        int(advisor["advisor_id"]): advisor
+        for advisor in advisors
+    }
+
+    ranked = []
+    for item in internal_matches:
+        number = int(item["advisor_id"])
+        advisor = advisor_by_number[number]
+        ranked.append({
+            "advisor_id": advisor.get("system_code", str(number)),
+            "advisor_name": advisor.get("name_ar", advisor.get("name_en")),
+            "score": item["score"],
+            "role": item["role"],
+            "matched_need_ids": item["matched_need_ids"],
+            "evidence_ids": item["evidence_ids"],
+            "reason": item["reason"],
+        })
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "rich_ai_v13_validated_needs",
+        "model": MATCHER_BASE_MODEL,
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": 16,
+        "candidate_needs_count": len(candidate_needs),
+        "candidate_needs": candidate_needs,
+        "validated_needs_count": len(validated_needs),
+        "validated_needs": validated_needs,
+        "matched_advisors": len(ranked),
+        "needs_input_tokens": needs_tokens,
+        "need_review_input_tokens": review_tokens,
+        "matching_input_tokens": match_tokens,
+        "ranked": ranked,
+    }
+
+    if job_input.get("debug", False):
+        response["needs_raw_output"] = needs_raw
+        response["need_review_raw_output"] = review_raw
+        response["need_review_decisions"] = need_decisions
         response["matching_raw_output"] = match_raw
 
     return response
@@ -3741,7 +4089,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v12(
+        return advisory_match_rich_v13(
             job_input
         )
 

@@ -213,7 +213,7 @@ RICH_MAX_INPUT_TOKENS = int(
 )
 
 RICH_MAX_NEW_TOKENS = int(
-    os.environ.get("RICH_MAX_NEW_TOKENS", "1050")
+    os.environ.get("RICH_MAX_NEW_TOKENS", "1400")
 )
 
 RICH_MIN_RELEVANT_SCORE = float(
@@ -228,55 +228,53 @@ _RICH_DEVICE = None
 RICH_ROUTER_SYSTEM_PROMPT = """أنت Athar OS Rich Advisor Router.
 
 هذه مرحلة اكتشاف الملاءمة قبل أن تختار الجمعية ستة مستشارين.
-مهمتك ليست اختيار أقل عدد من المستشارين، وليست تكوين مجلس نهائي.
-مهمتك هي تقييم الـ16 مستشارًا جميعًا وإرجاع كل مستشار له قيمة مادية حقيقية للحالة الحالية.
+مهمتك تقييم الـ16 مستشارًا جميعًا باستخدام ملفات Expert DNA الغنية، ثم إرجاع كل المستشارين المناسبين فعلاً فقط.
 
 قواعد حاسمة:
-1) قيّم جميع المستشارين في مقارنة عالمية واحدة باستخدام ملفات Expert DNA الغنية.
-2) لا تشترط أن تقول المنظمة "لدينا مشكلة" أو "نحتاج". الملاءمة قد تأتي من:
+1) فكّر في الـ16 جميعًا قبل الإخراج.
+2) لا يوجد عدد ثابت؛ قد يكون المناسب 2 أو 5 أو 8 أو أكثر.
+3) لا تشترط وجود كلمة "تحتاج" أو "مشكلة". الملاءمة قد تأتي من:
    - فجوة أو مخاطرة صريحة.
    - حاجة مستنتجة مباشرة من الوقائع.
-   - تعقيد تشغيلي/برامجي قائم فعليًا.
-   - فرصة تحسين أو قرار مهم يظهر من حجم وتنوع العمل.
-3) لا تعتبر إنجازًا سابقًا وحده دليلاً على وجود فجوة حالية.
-4) Supporting relevance مقبول إذا كان المستشار سيضيف قيمة مادية مستقلة، وليس مجرد علاقة هامشية.
-5) لا يوجد عدد ثابت. قد يكون المناسب 2 أو 4 أو 7 أو أكثر.
-6) لا تطبق Minimum Expert Principle في هذه المرحلة؛ الاختيار النهائي يتم لاحقًا.
-7) لا تخترع احتياجًا أو معلومة. كل relevant=true يجب أن يستند إلى evidence_ids موجودة في FACTS.
-8) activation_when دليل إيجابي. not_primary_when وboundaries تمنع تضخيم الدور لكنها لا تمنع دورًا مساندًا حقيقيًا.
-9) فرّق بدقة بين المجالات المتجاورة:
-   - 14 KPI/Dashboard مقابل 15 MEAL/Impact.
-   - 11 Initiative Design مقابل 12 Operational Planning مقابل 13 Portfolio/Program/Project.
-   - 1 Executive Leadership مقابل 16 Governance/Compliance.
-   - 2 Institutional Diagnosis مقابل 8 Strategic Planning.
-   - 5 Change/Adoption مقابل 6 Quality/Continuous Improvement.
-10) قيّم واقع المنظمة كله: عدد البرامج، تنوعها، المواسم، الفئات، التوسع، الأنظمة، الحوكمة، القياس، الشراكات، المخاطر، والقرارات الظاهرة.
+   - تعقيد تشغيلي/برامجي حقيقي.
+   - فرصة تحسين مادية واضحة من واقع عمل المنظمة.
+4) لا تعتبر الإنجاز السابق وحده دليلاً على وجود فجوة حالية.
+5) Supporting مقبول فقط إذا كانت له قيمة مادية مستقلة، وليس ارتباطًا هامشيًا.
+6) لا تطبق Minimum Expert Principle هنا؛ الاختيار النهائي لستة مستشارين يتم لاحقًا.
+7) كل مستشار مختار يجب أن يستند إلى evidence_ids صحيحة من FACTS.
+8) activation_when دليل إيجابي، وnot_primary_when وboundaries تمنع تضخيم الدور.
+9) فرّق بدقة بين:
+   - 14 KPI/Dashboard و15 MEAL/Impact.
+   - 11 Initiative Design و12 Operational Planning و13 Portfolio/Program/Project.
+   - 1 Executive Leadership و16 Governance/Compliance.
+   - 2 Institutional Diagnosis و8 Strategic Planning.
+   - 5 Change/Adoption و6 Quality/Continuous Improvement.
+10) لا تُخرج المستشارين غير المناسبين.
 
 معايرة score:
 0.85-1.00 = ملاءمة محورية وواضحة
 0.70-0.84 = ملاءمة قوية
 0.50-0.69 = دور مساند مادي
 0.40-0.49 = قيمة محدودة لكن حقيقية
-أقل من 0.40 = غالبًا غير مناسب
+أقل من 0.40 = لا تخرجه
 
 role:
-core = المستشار يعالج بعدًا رئيسيًا ظاهرًا في الحالة
+core = يعالج بعدًا رئيسيًا ظاهرًا في الحالة
 supporting = يضيف بعدًا مساندًا ماديًا
-none = غير مناسب
 
-أخرج JSON فقط.
-يجب أن تحتوي evaluations على 16 صفًا بالضبط، واحد لكل advisor_id من 1 إلى 16.
-اجعل reason قصيرة جدًا، بحد أقصى 18 كلمة.
+أعد JSON صالحًا فقط، بدون Markdown، وبدون شرح خارج JSON.
+استخدم المفتاح advisor_id حرفيًا كما هو.
+اجعل reason جملة واحدة قصيرة جدًا، بحد أقصى 14 كلمة.
 اجعل evidence_ids من 1 إلى 3 فقط.
 
+الشكل المطلوب:
 {
-  "evaluations": [
+  "matches": [
     {
-      "advisor_id": 1,
-      "relevant": true,
-      "score": 0.82,
+      "advisor_id": 13,
+      "score": 0.91,
       "role": "core",
-      "evidence_ids": ["F2", "P3"],
+      "evidence_ids": ["F6", "P3"],
       "reason": "سبب عربي قصير ومحدد"
     }
   ]
@@ -574,94 +572,57 @@ def generate_rich_evaluations(
     }
 
 
-def normalize_rich_evaluations(
-    parsed,
-    facts,
-):
+
+def normalize_rich_matches(parsed, facts):
 
     valid_ids = set(range(1, 17))
-    fact_ids = {
-        fact["fact_id"]
-        for fact in facts
-    }
+    fact_ids = {fact["fact_id"] for fact in facts}
 
-    raw_evaluations = parsed.get(
-        "evaluations",
-        []
-    )
+    raw_matches = parsed.get("matches", [])
 
-    if not isinstance(raw_evaluations, list):
-        raise ValueError(
-            "Rich router output missing evaluations list."
-        )
+    if not isinstance(raw_matches, list):
+        raise ValueError("Rich router output missing matches list.")
 
-    by_id = {}
+    normalized = []
+    seen = set()
 
-    for row in raw_evaluations:
+    for row in raw_matches:
 
         if not isinstance(row, dict):
             continue
 
+        advisor_value = None
+        for key in ("advisor_id", " advisor_id", "adviser_id", " adviser_id"):
+            if key in row:
+                advisor_value = row.get(key)
+                break
+
         try:
-            advisor_id = int(
-                row.get("advisor_id")
-            )
+            advisor_id = int(advisor_value)
         except (TypeError, ValueError):
             continue
 
-        if advisor_id not in valid_ids:
+        if advisor_id not in valid_ids or advisor_id in seen:
             continue
 
         try:
-            score = float(
-                row.get("score", 0.0)
-            )
+            score = float(row.get("score", 0.0))
         except (TypeError, ValueError):
             score = 0.0
 
-        score = max(
-            0.0,
-            min(1.0, score),
-        )
+        score = max(0.0, min(1.0, score))
 
-        relevant = bool(
-            row.get("relevant", False)
-        )
-
-        # Keep the model decision but make impossible combinations consistent.
         if score < RICH_MIN_RELEVANT_SCORE:
-            relevant = False
+            continue
 
-        role = str(
-            row.get(
-                "role",
-                "none"
-            )
-        ).strip().lower()
+        role = str(row.get("role", "supporting")).strip().lower()
 
-        if role not in {
-            "core",
-            "supporting",
-            "none",
-        }:
-            role = (
-                "supporting"
-                if relevant
-                else "none"
-            )
+        if role not in {"core", "supporting"}:
+            role = "supporting"
 
-        if not relevant:
-            role = "none"
+        evidence_ids = row.get("evidence_ids", [])
 
-        evidence_ids = row.get(
-            "evidence_ids",
-            []
-        )
-
-        if not isinstance(
-            evidence_ids,
-            list,
-        ):
+        if not isinstance(evidence_ids, list):
             evidence_ids = []
 
         evidence_ids = [
@@ -670,10 +631,8 @@ def normalize_rich_evaluations(
             if str(fid) in fact_ids
         ][:3]
 
-        # A selected advisor must have real evidence.
-        if relevant and not evidence_ids:
-            relevant = False
-            role = "none"
+        if not evidence_ids:
+            continue
 
         reason = re.sub(
             r"\s+",
@@ -681,46 +640,31 @@ def normalize_rich_evaluations(
             str(row.get("reason", "")).strip(),
         )
 
-        if len(reason.split()) > 22:
-            reason = (
-                " ".join(reason.split()[:22])
-                .rstrip("،,.")
-                + "."
-            )
+        if not reason:
+            reason = "ملاءمة مادية مدعومة بوقائع من بيانات المنظمة."
 
-        by_id[advisor_id] = {
+        if len(reason.split()) > 18:
+            reason = " ".join(reason.split()[:18]).rstrip("،,.") + "."
+
+        normalized.append({
             "advisor_id": advisor_id,
-            "relevant": relevant,
             "score": round(score, 4),
             "role": role,
             "evidence_ids": evidence_ids,
             "reason": reason,
-        }
+        })
 
-    # We require explicit evaluation of all 16 to avoid silent false negatives.
-    missing_ids = [
-        advisor_id
-        for advisor_id in range(1, 17)
-        if advisor_id not in by_id
-    ]
+        seen.add(advisor_id)
 
-    if missing_ids:
-        raise ValueError(
-            "Rich router did not evaluate all advisors. "
-            f"Missing IDs: {missing_ids}"
-        )
+    normalized.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
 
-    evaluations = [
-        by_id[advisor_id]
-        for advisor_id in range(1, 17)
-    ]
-
-    return evaluations
+    return normalized
 
 
-def advisory_match_rich_v8(
-    job_input,
-):
+def advisory_match_rich_v8(job_input):
 
     organization, programs = normalize_advisory_input(
         job_input.get("input", {})
@@ -738,32 +682,15 @@ def advisory_match_rich_v8(
         programs,
     )
 
-    evaluations = normalize_rich_evaluations(
+    ranked = normalize_rich_matches(
         result["parsed"],
         result["facts"],
-    )
-
-    ranked = [
-        {
-            "advisor_id": row["advisor_id"],
-            "score": row["score"],
-            "role": row["role"],
-            "reason": row["reason"],
-            "evidence_ids": row["evidence_ids"],
-        }
-        for row in evaluations
-        if row["relevant"]
-    ]
-
-    ranked.sort(
-        key=lambda item: item["score"],
-        reverse=True,
     )
 
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v8",
+        "routing_engine": "rich_ai_v8_1",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -774,9 +701,10 @@ def advisory_match_rich_v8(
     }
 
     if job_input.get("debug", False):
-        response["evaluations"] = evaluations
+        response["raw_output"] = result["raw_text"]
 
     return response
+
 
 
 RUNS = {

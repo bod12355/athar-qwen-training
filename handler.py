@@ -922,7 +922,7 @@ def advisory_match_rich_v9(job_input):
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v10_1_global",
+        "routing_engine": "rich_ai_v11_adjudicated",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -1080,6 +1080,280 @@ def advisory_match_rich_v10(job_input):
     }
     if job_input.get("debug", False):
         response["raw_output"] = raw_text
+    return response
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v11
+# Pass 1: global proposal across all 16 rich profiles.
+# Pass 2: adversarial AI adjudication that removes speculative matches.
+# Python only parses, validates IDs/evidence, and formats registered IDs.
+# ---------------------------------------------------------------------
+
+RICH_V11_REVIEW_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V11_REVIEW_MAX_NEW_TOKENS", "1200")
+)
+
+RICH_V11_REVIEW_PROMPT = """أنت Athar OS Adversarial Routing Adjudicator.
+
+لديك:
+1) FACTS موثقة عن المنظمة وبرامجها.
+2) ملفات Expert DNA للـ16 مستشارًا.
+3) PROPOSED_MATCHES من مرحلة AI أولى.
+
+مهمتك مراجعة كل ترشيح بصرامة ثم الاحتفاظ فقط بالمستشارين الذين توجد لهم حاجة أو فرصة تحسين مادية حقيقية الآن.
+أنت مرحلة منع الـOvermatching. الافتراضي هو DROP ما لم تثبت الوقائع Trigger حقيقيًا.
+
+السؤال الحاكم لكل ترشيح:
+"لو لم يكن هذا المستشار موجودًا الآن، هل هناك قرار/مشكلة/تعقيد/تحسين مادي ظاهر في الوقائع سيبقى دون مالك مناسب؟"
+
+قواعد إلزامية:
+- لا تقبل سببًا من نوع "وجود البرامج يعني الحاجة..." إلا إذا كانت طبيعة البرامج نفسها تخلق تعقيدًا يطابق نطاق المستشار مباشرة.
+- لا تحول الإنجاز إلى فجوة.
+- لا تحول وجود نظام أو سياسة أو برنامج إلى مشكلة غير مذكورة.
+- لا تستخدم استنتاجات افتراضية مثل "قد تحتاج" أو "من الأفضل" أو "يمكن أن يفيد".
+- يجب أن يرتبط كل KEEP بـ activation_when حقيقي ومستقل في DNA المستشار.
+- إذا كان نفس الاحتياج مملوكًا بشكل أوضح لمستشار آخر، أسقط المستشار الأضعف ما لم يضيف قيمة مستقلة مختلفة.
+- لا يوجد عدد ثابت. احتفظ بأي عدد تبرره الأدلة فعلًا.
+- لا تستخدم ترتيب أو درجة المرحلة الأولى كدليل؛ راجع من الصفر.
+
+اختبارات منع الاستنتاج الزائد:
+- ERP / الأرشفة / إعادة الهيكلة إنجازات؛ لا تثبت تلقائيًا Change Management أو KPI أو Maturity.
+- ارتفاع درجة الحوكمة لا يثبت Governance Gap.
+- وجود برامج كثيرة لا يثبت الحاجة إلى MEAL أو KPI أو Initiative Redesign.
+- وجود خدمات صحية/اجتماعية لا يثبت مشكلة Quality.
+- وجود خدمات موسمية لا يثبت Business Continuity إلا مع خطر/تعطل/اعتمادية حرجة.
+- زيادة الإيرادات لا تثبت الحاجة إلى Partnerships أو External Analysis أو KPI.
+- وجود برامج تدريبية لا يثبت Change Adoption.
+- وجود مبادرات قائمة لا يعني أنها تحتاج إعادة تصميم.
+- الاستراتيجية لا تُفترض لمجرد كبر المنظمة.
+- التشخيص المؤسسي لا يُفترض لمجرد أن المنظمة نفذت تطويرًا سابقًا.
+- المستشار التنفيذي لا يُرشح لمجرد وجود برامج كثيرة؛ يلزم قرار تنفيذي متعدد الأبعاد أو مفاضلة/ملكية/موارد واضحة.
+- Portfolio/Program/Project Advisor يمكن أن يكون مناسبًا عندما يظهر تعدد وتنوع وتداخل كبير للبرامج والمحافظ والأولويات.
+- Operational Planning Advisor يمكن أن يكون مناسبًا عندما تظهر موسمية/جداول/موارد/تنسيق تشغيلي بين برامج متعددة.
+
+لكل مستشار مقترح أخرج سطرًا واحدًا فقط:
+ADVISOR_ID|KEEP_OR_DROP|FINAL_SCORE|ROLE|EVIDENCE_IDS|REASON
+
+KEEP_OR_DROP = KEEP أو DROP
+FINAL_SCORE عدد صحيح 0-100.
+ROLE = core أو supporting أو none.
+EVIDENCE_IDS من FACTS فقط، 1-3 أدلة عند KEEP، ويمكن أن تكون - عند DROP.
+REASON جملة عربية قصيرة تشرح سبب القرار.
+
+إذا KEEP:
+- FINAL_SCORE يجب أن يكون 40 أو أكثر.
+إذا DROP:
+- FINAL_SCORE أقل من 40 وROLE=none.
+
+أخرج فقط السطور، بدون JSON وبدون Markdown وبدون شرح إضافي.
+"""
+
+
+def _parse_v11_review_lines(text, proposed_ids, valid_fact_ids):
+    cleaned = str(text).replace("```text", "").replace("```", "").strip()
+    kept = []
+    decisions = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 5)
+        if len(parts) != 6:
+            continue
+
+        a_raw, decision_raw, score_raw, role_raw, ev_raw, reason_raw = [p.strip() for p in parts]
+        a_match = re.search(r"\d+", a_raw)
+        s_match = re.search(r"\d+(?:\.\d+)?", score_raw)
+        if not a_match or not s_match:
+            continue
+
+        advisor_id = int(a_match.group())
+        if advisor_id not in proposed_ids:
+            continue
+
+        decision = decision_raw.upper()
+        if decision not in {"KEEP", "DROP"}:
+            continue
+
+        score = float(s_match.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        role = role_raw.lower()
+        if role not in {"core", "supporting", "none"}:
+            role = "none" if decision == "DROP" else "supporting"
+
+        evidence_ids = []
+        if ev_raw != "-":
+            for token in re.split(r"[,،;\s]+", ev_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+        evidence_ids = evidence_ids[:3]
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+        if len(reason.split()) > 20:
+            reason = " ".join(reason.split()[:20]).rstrip("،,.") + "."
+
+        final_decision = decision
+        if decision == "KEEP" and (score < 40 or not evidence_ids):
+            final_decision = "DROP"
+            role = "none"
+
+        decisions[advisor_id] = {
+            "decision": final_decision,
+            "score": round(score / 100.0, 4),
+            "role": role,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+        if final_decision == "KEEP":
+            if role == "none":
+                role = "supporting"
+            kept.append({
+                "advisor_id": advisor_id,
+                "score": round(score / 100.0, 4),
+                "role": role,
+                "evidence_ids": evidence_ids,
+                "reason": reason,
+            })
+
+    # Any proposed advisor not explicitly reviewed is not silently kept.
+    return kept, decisions
+
+
+def generate_rich_v11_review(facts, advisors, proposed_matches):
+    import torch
+
+    messages = [
+        {"role": "system", "content": RICH_V11_REVIEW_PROMPT},
+        {"role": "user", "content": json.dumps({
+            "facts": facts,
+            "advisors": advisors,
+            "proposed_matches": proposed_matches,
+        }, ensure_ascii=False)},
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(encoded["attention_mask"].sum().item())
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v11 review input too long: {input_tokens} > {RICH_MAX_INPUT_TOKENS}"
+        )
+
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+    print(f"Rich v11 review input tokens: {input_tokens}", flush=True)
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V11_REVIEW_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    raw_text = _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True)
+    return raw_text, input_tokens
+
+
+def advisory_match_rich_v11(job_input):
+    organization, programs = normalize_advisory_input(job_input.get("input", {}))
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(organization, programs)
+    valid_fact_ids = {f["fact_id"] for f in facts}
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print("Rich v11 pass 1/2: global discovery across all 16 advisors...", flush=True)
+    proposal_raw, proposal_tokens = generate_rich_v10_global(facts, advisors)
+
+    proposed = _parse_rich_v9_lines(
+        proposal_raw,
+        set(range(1, 17)),
+        valid_fact_ids,
+    )
+    proposed.sort(key=lambda x: x["score"], reverse=True)
+
+    print(
+        f"Rich v11 pass 2/2: adversarial review of {len(proposed)} proposed advisors...",
+        flush=True,
+    )
+
+    if proposed:
+        review_raw, review_tokens = generate_rich_v11_review(facts, advisors, proposed)
+        kept_internal, review_decisions = _parse_v11_review_lines(
+            review_raw,
+            {int(item["advisor_id"]) for item in proposed},
+            valid_fact_ids,
+        )
+    else:
+        review_raw = "NONE"
+        review_tokens = 0
+        kept_internal = []
+        review_decisions = {}
+
+    kept_internal.sort(key=lambda x: x["score"], reverse=True)
+
+    advisor_by_number = {
+        int(advisor["advisor_id"]): advisor
+        for advisor in advisors
+    }
+
+    ranked = []
+    for item in kept_internal:
+        number = int(item["advisor_id"])
+        advisor = advisor_by_number[number]
+        ranked.append({
+            "advisor_id": advisor.get("system_code", str(number)),
+            "advisor_name": advisor.get("name_ar", advisor.get("name_en")),
+            "score": item["score"],
+            "role": item["role"],
+            "evidence_ids": item["evidence_ids"],
+            "reason": item["reason"],
+        })
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "rich_ai_v11_adjudicated",
+        "model": MATCHER_BASE_MODEL,
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": 16,
+        "proposed_advisors": len(proposed),
+        "matched_advisors": len(ranked),
+        "proposal_input_tokens": proposal_tokens,
+        "review_input_tokens": review_tokens,
+        "ranked": ranked,
+    }
+
+    if job_input.get("debug", False):
+        response["proposal_raw_output"] = proposal_raw
+        response["review_raw_output"] = review_raw
+        response["review_decisions"] = review_decisions
+
     return response
 
 
@@ -3022,7 +3296,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v10(
+        return advisory_match_rich_v11(
             job_input
         )
 

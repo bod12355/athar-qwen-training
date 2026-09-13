@@ -707,6 +707,237 @@ def advisory_match_rich_v8(job_input):
 
 
 
+RICH_V9_GROUPS = [
+    [1, 2, 3, 4],
+    [5, 6, 7, 16],
+    [8, 9, 10, 11],
+    [12, 13, 14, 15],
+]
+
+RICH_V9_MAX_NEW_TOKENS = int(os.environ.get("RICH_V9_MAX_NEW_TOKENS", "420"))
+
+RICH_V9_SYSTEM_PROMPT = """أنت Athar OS Rich Advisor Router v9.
+
+ستستلم FACTS موثقة عن منظمة وبرامجها، وأربعة مستشارين بملفات Expert DNA غنية.
+قيّم الأربعة جميعًا، ثم أخرج فقط المستشارين الذين لديهم قيمة مادية حقيقية الآن.
+
+قواعد:
+- لا يوجد عدد ثابت.
+- لا تشترط كلمة "تحتاج" أو "مشكلة".
+- يجوز الترشيح بسبب فجوة صريحة، حاجة مستنتجة مباشرة، تعقيد تشغيلي/برامجي حقيقي، أو فرصة تحسين مادية واضحة.
+- لا تخترع مشكلة غير موجودة.
+- الإنجاز السابق وحده لا يعني وجود حاجة حالية.
+- وجود ERP أو إعادة هيكلة أو درجة حوكمة مرتفعة لا يعني تلقائيًا الحاجة لمستشار تغيير أو حوكمة.
+- وجود برنامج قائم لا يعني تلقائيًا الحاجة لإعادة تصميمه.
+- كثرة البرامج وتنوعها قد تدعم 12 أو 13 إذا كان التعقيد واضحًا.
+- 15 يحتاج دليل نتائج/تقييم/أثر/تعلم، وليس مجرد وجود برامج.
+- 14 يحتاج KPI/مصادر بيانات/خط أساس/مستهدفات/لوحات.
+- 8 يحتاج قرارًا أو مراجعة أو مفاضلة استراتيجية حقيقية.
+- 2 يحتاج تشخيص/نضج/جاهزية أو فجوة قدرة فعلية.
+- 16 يحتاج فجوة/مخاطرة/قرار حوكمي أو امتثال فعلي.
+- 5 يحتاج تحول/تبنٍ/مقاومة/انتقال فعلي.
+- Supporting مقبول فقط إذا كانت له قيمة مادية مستقلة.
+- كل ترشيح يجب أن يستند إلى 1-3 evidence_ids صحيحة.
+- السبب يجب أن يوضح لماذا المستشار مناسب الآن.
+
+الدرجات أعداد صحيحة:
+85-100 محوري
+70-84 قوي
+50-69 مساند مادي
+40-49 محدود لكنه حقيقي
+أقل من 40 لا تخرجه
+
+أخرج سطرًا واحدًا لكل مستشار مناسب فقط:
+ADVISOR_ID|SCORE|ROLE|EVIDENCE_IDS|REASON
+
+ROLE = core أو supporting
+EVIDENCE_IDS مثال F6,P3
+REASON جملة عربية قصيرة.
+
+مثال:
+13|92|core|F6,P3|تعدد البرامج وتنوعها يخلق حاجة فعلية لإدارة المحفظة والأولويات.
+
+إذا لم يكن أي منهم مناسبًا اكتب:
+NONE
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+def _rich_v9_advisor_map():
+    return {int(a["advisor_id"]): a for a in _RICH_REGISTRY["advisors"]}
+
+
+def _parse_rich_v9_lines(text, allowed_advisor_ids, valid_fact_ids):
+    cleaned = str(text).replace("```text", "").replace("```", "").strip()
+
+    if not cleaned or cleaned.upper() == "NONE":
+        return []
+
+    results = []
+    seen = set()
+
+    for raw_line in cleaned.splitlines():
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw_line.strip())
+        if not line or line.upper() == "NONE":
+            continue
+
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+
+        a_raw, s_raw, role_raw, ev_raw, reason_raw = [x.strip() for x in parts]
+        a_m = re.search(r"\d+", a_raw)
+        s_m = re.search(r"\d+(?:\.\d+)?", s_raw)
+
+        if not a_m or not s_m:
+            continue
+
+        advisor_id = int(a_m.group())
+        if advisor_id not in allowed_advisor_ids or advisor_id in seen:
+            continue
+
+        score = float(s_m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+        if score < 40:
+            continue
+
+        role = role_raw.lower()
+        if role not in {"core", "supporting"}:
+            role = "supporting"
+
+        evidence_ids = []
+        for token in re.split(r"[,،;\s]+", ev_raw):
+            token = token.strip().upper()
+            if token in valid_fact_ids and token not in evidence_ids:
+                evidence_ids.append(token)
+        evidence_ids = evidence_ids[:3]
+
+        if not evidence_ids:
+            continue
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+        if not reason:
+            continue
+        if len(reason.split()) > 18:
+            reason = " ".join(reason.split()[:18]).rstrip("،,.") + "."
+
+        results.append({
+            "advisor_id": advisor_id,
+            "score": round(score / 100.0, 4),
+            "role": role,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        })
+        seen.add(advisor_id)
+
+    return results
+
+
+def generate_rich_v9_group(facts, advisors):
+    import torch
+
+    messages = [
+        {"role": "system", "content": RICH_V9_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(
+            {"facts": facts, "advisors": advisors},
+            ensure_ascii=False
+        )},
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(prompt, return_tensors="pt", add_special_tokens=False)
+    input_tokens = int(encoded["attention_mask"].sum().item())
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(f"Rich v9 group input too long: {input_tokens}")
+
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V9_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    text = _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True)
+    return text, input_tokens
+
+
+def advisory_match_rich_v9(job_input):
+    organization, programs = normalize_advisory_input(job_input.get("input", {}))
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(organization, programs)
+    valid_fact_ids = {f["fact_id"] for f in facts}
+    advisor_map = _rich_v9_advisor_map()
+
+    all_matches = []
+    debug_groups = []
+    total_tokens = 0
+
+    print("Rich v9: evaluating all 16 advisors in four groups...", flush=True)
+
+    for idx, group_ids in enumerate(RICH_V9_GROUPS, start=1):
+        print(f"Rich v9 group {idx}/4: {group_ids}", flush=True)
+
+        raw_text, input_tokens = generate_rich_v9_group(
+            facts,
+            [advisor_map[i] for i in group_ids],
+        )
+        total_tokens += input_tokens
+
+        parsed = _parse_rich_v9_lines(
+            raw_text,
+            set(group_ids),
+            valid_fact_ids,
+        )
+        all_matches.extend(parsed)
+
+        if job_input.get("debug", False):
+            debug_groups.append({
+                "group": group_ids,
+                "input_tokens": input_tokens,
+                "raw_output": raw_text,
+                "parsed_matches": parsed,
+            })
+
+    all_matches.sort(key=lambda x: x["score"], reverse=True)
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "rich_ai_v9",
+        "model": MATCHER_BASE_MODEL,
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": 16,
+        "matched_advisors": len(all_matches),
+        "total_input_tokens": total_tokens,
+        "ranked": all_matches,
+    }
+
+    if job_input.get("debug", False):
+        response["group_debug"] = debug_groups
+
+    return response
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -2638,7 +2869,7 @@ def handler(job):
 
             return {
                 "status": "advisory_match_preflight_ok",
-                "routing_engine": "rich_ai_v8",
+                "routing_engine": "rich_ai_v9",
                 "model": MATCHER_BASE_MODEL,
                 "registry_path": RICH_REGISTRY_PATH,
                 "advisor_count": len(
@@ -2646,7 +2877,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v8(
+        return advisory_match_rich_v9(
             job_input
         )
 

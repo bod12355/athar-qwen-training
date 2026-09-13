@@ -3234,6 +3234,865 @@ def advisory_match_rich_v17(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v18
+# Key changes:
+# 1) Never tell the advisor matcher to "fill" a target count.
+# 2) Discover grounded NEEDS + OPPORTUNITIES before seeing advisors.
+# 3) Use advisor SYSTEM_CODE directly inside the AI prompt/output to avoid
+#    numeric-ID identity drift.
+# 4) If the pool is too narrow, expand GROUNDED THEMES (not advisors),
+#    validate them, then rematch.
+# 5) Public payload stays exactly: {"ranked":[advisor_id, score, reason]}.
+# ---------------------------------------------------------------------
+
+RICH_V18_THEME_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V18_THEME_MAX_NEW_TOKENS", "950")
+)
+
+RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS", "850")
+)
+
+RICH_V18_MATCH_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V18_MATCH_MAX_NEW_TOKENS", "1800")
+)
+
+RICH_V18_THEME_EXPAND_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V18_THEME_EXPAND_MAX_NEW_TOKENS", "850")
+)
+
+RICH_V18_DESIRED_CHOICE_POOL_MIN = int(
+    os.environ.get("RICH_V18_DESIRED_CHOICE_POOL_MIN", "7")
+)
+
+RICH_V18_THEME_PROMPT = """أنت Athar OS Advisory Theme Discovery Engine v18.
+
+ستستلم FACTS فقط عن الجمعية وبرامجها. لا ترى أي مستشارين في هذه المرحلة.
+
+استخرج كل "Advisory Theme" مادي يمكن أن تحتاج الجمعية فيه إلى استشارة الآن.
+الثيم قد يكون:
+- EXPLICIT_NEED: فجوة/مشكلة/مخاطرة/هدف تحسين مذكور.
+- OPERATIONAL_COMPLEXITY: تعقيد حقيقي ناتج عن كثرة البرامج أو المواسم أو الموارد أو الاعتماديات.
+- STRATEGIC_OPPORTUNITY: فرصة قرار/مواءمة/ترتيب أولويات واضحة من الوقائع.
+- SUSTAINMENT_OPPORTUNITY: إنجاز أو تحول قائم يحتاج تثبيتًا/تكاملًا/تحسينًا مستمرًا، دون الادعاء بوجود فشل.
+
+مهم جدًا:
+- لا تحول الإنجاز إلى مشكلة.
+- يجوز أن تقول "فرصة لتثبيت/استثمار/توسيع قيمة إنجاز قائم" إذا كان ذلك منطقيًا وماديًا.
+- لا تستخدم "قد يحتاج" أو "ربما".
+- لا تفترض شراكات أو مخاطر أو أثر أو KPI أو حوكمة أو تغيير إذا لم تعط الوقائع أساسًا ماديًا لها.
+- لا تكرر نفس الفكرة بصيغ مختلفة.
+- الثيم يجب أن يكون محددًا بما يكفي ليُسند لاحقًا إلى مستشار أو أكثر.
+- استخرج جميع الثيمات الحقيقية، وليس أقل عدد ممكن.
+
+أمثلة مقبولة:
+- تنوع محفظة البرامج يخلق حاجة لترتيب الأولويات والاعتماديات وتخصيص الموارد.
+- البرامج الموسمية والمتنوعة تخلق حاجة لتنسيق الخطط والجداول والموارد.
+- تنفيذ إعادة هيكلة ونظام ERP وسياسات جديدة يخلق فرصة مادية لتثبيت التكامل المؤسسي وقياس الاستفادة من التحول، دون افتراض وجود مقاومة.
+- وجود خدمات صحية واجتماعية وتعليمية متعددة قد يخلق فرصة لتوحيد معايير جودة الخدمة فقط إذا كانت الوقائع تدعم تنوع طرق التقديم والحاجة للاتساق.
+
+أمثلة غير مقبولة:
+- ERP يعني وجود مشكلة تغيير.
+- درجة حوكمة عالية تعني فجوة حوكمة.
+- وجود برامج يعني تلقائيًا قياس أثر.
+- وجود إيرادات يعني تلقائيًا شراكات.
+- كبر الجمعية يعني تلقائيًا تخطيط استراتيجي.
+
+أخرج:
+THEME_ID|TYPE|PRIORITY|EVIDENCE_IDS|THEME
+
+TYPE = EXPLICIT_NEED أو OPERATIONAL_COMPLEXITY أو STRATEGIC_OPPORTUNITY أو SUSTAINMENT_OPPORTUNITY
+PRIORITY = high أو medium أو low
+EVIDENCE_IDS من FACTS فقط، 1-4
+THEME جملة عربية واضحة ومحددة
+
+إذا لا يوجد شيء مادي اكتب NONE.
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+RICH_V18_THEME_REVIEW_PROMPT = """أنت Athar OS Advisory Theme Validator v18.
+
+راجع CANDIDATE_THEMES مقابل FACTS فقط. لا ترى المستشارين.
+
+KEEP إذا:
+- الثيم مدعوم مباشرة بالوقائع، أو
+- استنتاجه قريب ومادي من تعقيد ظاهر، أو
+- هو فرصة تثبيت/استثمار لإنجاز قائم دون اختراع فشل.
+
+DROP إذا:
+- يحتاج افتراضًا إضافيًا غير موجود.
+- يحول إنجازًا إلى مشكلة.
+- مجرد مجال عام مفيد.
+- يكرر ثيمًا آخر بدون إضافة مادية.
+- يعتمد على كلمات مثل "قد يحتاج/ربما" بدل دليل.
+
+مهم:
+SUSTAINMENT_OPPORTUNITY يمكن أن تكون صحيحة حتى بدون مشكلة، لكن يجب أن يكون لها مخرج استشاري مادي واضح مرتبط بوقائع قائمة.
+
+أخرج لكل ثيم:
+THEME_ID|KEEP_OR_DROP|PRIORITY|EVIDENCE_IDS|REASON
+
+KEEP_OR_DROP = KEEP أو DROP
+PRIORITY = high أو medium أو low أو none
+EVIDENCE_IDS من FACTS فقط، 1-4 عند KEEP ويمكن - عند DROP
+REASON سبب عربي واضح للمراجعة
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+RICH_V18_THEME_EXPAND_PROMPT = """أنت Athar OS Advisory Theme Coverage Reviewer.
+
+لديك FACTS وVALIDATED_THEMES الحالية.
+القائمة الحالية أنتجت Candidate Pool أقل من 7، والجمعية ستختار 6 لاحقًا.
+
+لا تبحث عن مستشارين ولا تعرف أسماءهم.
+ابحث فقط عن ثيمات/فرص استشارية مادية أخرى فاتت الجولة الأولى، إن كانت الوقائع تدعمها فعلًا.
+
+يجوز اكتشاف:
+- فرص تثبيت وتحسين إنجازات مؤسسية قائمة.
+- فرص مواءمة استراتيجية ناتجة عن تعدد البرامج وتغير نموذج العمل.
+- فرص جودة/أداء/تكامل إذا كان لها أساس فعلي في البيانات.
+- احتياجات تنسيق أو قرار أو إدارة موارد.
+
+ممنوع:
+- اختراع فجوة للوصول إلى عدد أكبر.
+- تكرار VALIDATED_THEMES.
+- افتراض Impact/KPI/Governance/Change/Risk/Partnerships دون أساس مادي.
+
+أخرج الثيمات الإضافية فقط:
+THEME_ID|TYPE|PRIORITY|EVIDENCE_IDS|THEME
+
+إذا لا توجد ثيمات إضافية حقيقية اكتب NONE.
+ممنوع JSON وممنوع Markdown وممنوع شرح إضافي.
+"""
+
+RICH_V18_MATCH_PROMPT = """أنت Athar OS Global Advisor Relevance Engine v18.
+
+ستستلم:
+1) FACTS موثقة.
+2) VALIDATED_THEMES تم اكتشافها والتحقق منها قبل رؤية المستشارين.
+3) ROUTING_CARDS للـ16 مستشارًا، وكل بطاقة لها system_code وهو الهوية الوحيدة المسموح باستخدامها.
+
+مهمتك تقييم الـ16 جميعًا عالميًا وباستقلالية.
+لا يوجد Target Count هنا. لا تقلل العدد ولا تكبره.
+أخرج كل مستشار مرتبط فعلاً بثيم واحد أو أكثر، واستبعد القرب العام.
+
+تصنيفات الصلة:
+DIRECT
+= يملك الثيم أو مخرجًا محوريًا داخله مباشرة.
+
+COMPLEMENTARY
+= يضيف مخرجًا مستقلًا وماديًا مختلفًا عن المالك المباشر لنفس الثيم.
+
+RELEVANT_OPTION
+= له قيمة استشارية حقيقية ومسنودة في الثيم، لكنها أقل مركزية.
+
+ADJACENT
+= قريب من الموضوع لكنه لا يقدم مخرجًا مستقلًا مطلوبًا.
+
+UNRELATED
+= لا صلة حقيقية.
+
+أخرج فقط DIRECT + COMPLEMENTARY + RELEVANT_OPTION.
+
+قواعد:
+- استخدم system_code حرفيًا من البطاقة. ممنوع تحويله إلى رقم.
+- اقرأ advisor_name وowned_outcome وactivation_when وnot_primary_when وboundaries قبل الحكم.
+- لا تنسب للمستشار تخصص مستشار آخر.
+- لا تخترع Theme جديدًا.
+- لا يكفي أن تقول "يمكنه المساعدة".
+- يجب أن تذكر مساهمته المحددة في الثيم.
+- يمكن أن يكون أكثر من مستشار مرتبطًا بنفس الثيم إذا اختلفت مساهمتهم ماديًا.
+- لا تطبق Minimum Expert Principle.
+- العدد النهائي نتيجة للأدلة فقط.
+
+أمثلة هوية مهمة:
+AOS-LD-02 = التشخيص والنضج المؤسسي، وليس التخطيط التشغيلي.
+AOS-SP-09 = الهوية والرؤية والرسالة والقيم.
+AOS-SP-10 = الأهداف والقضايا الاستراتيجية.
+AOS-SP-11 = تصميم المبادرات الاستراتيجية.
+AOS-SP-12 = التخطيط التشغيلي.
+AOS-SP-13 = المحافظ والبرامج والمشاريع.
+AOS-SP-14 = مؤشرات الأداء ولوحات القيادة.
+AOS-SP-15 = MEAL وقياس الأثر.
+
+SCORE:
+90-100 = DIRECT محوري
+80-89 = DIRECT/COMPLEMENTARY قوي
+70-79 = COMPLEMENTARY واضح
+55-69 = RELEVANT_OPTION مادي
+40-54 = RELEVANT_OPTION أضعف لكنه حقيقي
+أقل من 40 لا تخرجه
+
+REASON:
+- 30 إلى 55 كلمة عربية.
+- اذكر الثيم/الواقعة التي تربطه بالجمعية.
+- اشرح المخرج أو القيمة المحددة التي يقدمها.
+- اشرح لماذا هذه المساهمة مختلفة عن مجرد مساعدة عامة.
+- ممنوع الأسباب القصيرة من نوع "لديه خبرة في...".
+
+أخرج:
+SYSTEM_CODE|RELATION|SCORE|THEME_IDS|EVIDENCE_IDS|REASON
+
+RELATION = DIRECT أو COMPLEMENTARY أو RELEVANT_OPTION
+THEME_IDS من VALIDATED_THEMES فقط
+EVIDENCE_IDS من FACTS فقط، 1-4
+
+إذا لا يوجد مستشار مناسب اكتب NONE.
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+def _v18_generate_text(system_prompt, payload, max_new_tokens):
+    import torch
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(
+        encoded["attention_mask"].sum().item()
+    )
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v18 input too long: {input_tokens} > {RICH_MAX_INPUT_TOKENS}"
+        )
+
+    encoded = {
+        k: v.to(_RICH_DEVICE)
+        for k, v in encoded.items()
+    }
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            repetition_penalty=1.06,
+            no_repeat_ngram_size=8,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    raw_text = _RICH_TOKENIZER.decode(
+        generated[0],
+        skip_special_tokens=True,
+    )
+
+    return raw_text, input_tokens
+
+
+def _parse_v18_themes(text, valid_fact_ids):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    if not cleaned or cleaned.upper() == "NONE":
+        return []
+
+    valid_types = {
+        "EXPLICIT_NEED",
+        "OPERATIONAL_COMPLEXITY",
+        "STRATEGIC_OPPORTUNITY",
+        "SUSTAINMENT_OPPORTUNITY",
+    }
+
+    themes = []
+    seen = set()
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+
+        theme_raw, type_raw, priority_raw, evidence_raw, text_raw = [
+            p.strip()
+            for p in parts
+        ]
+
+        m = re.search(
+            r"(?:T|N)\s*(\d+)",
+            theme_raw,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            continue
+
+        theme_id = f"T{int(m.group(1))}"
+        if theme_id in seen:
+            continue
+
+        theme_type = type_raw.upper()
+        if theme_type not in valid_types:
+            continue
+
+        priority = priority_raw.lower()
+        if priority not in {"high", "medium", "low"}:
+            priority = "medium"
+
+        evidence_ids = []
+        for token in re.split(
+            r"[,،;\s]+",
+            evidence_raw,
+        ):
+            token = token.strip().upper()
+            if (
+                token in valid_fact_ids
+                and token not in evidence_ids
+            ):
+                evidence_ids.append(token)
+
+        evidence_ids = evidence_ids[:4]
+
+        theme_text = re.sub(
+            r"\s+",
+            " ",
+            text_raw,
+        ).strip()
+
+        if not evidence_ids or not theme_text:
+            continue
+
+        themes.append({
+            "theme_id": theme_id,
+            "type": theme_type,
+            "priority": priority,
+            "evidence_ids": evidence_ids,
+            "theme": theme_text,
+        })
+
+        seen.add(theme_id)
+
+    return themes
+
+
+def _parse_v18_theme_review(
+    text,
+    candidate_themes,
+    valid_fact_ids,
+):
+    by_id = {
+        item["theme_id"]: item
+        for item in candidate_themes
+    }
+
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    validated = []
+    decisions = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+
+        theme_raw, decision_raw, priority_raw, evidence_raw, reason_raw = [
+            p.strip()
+            for p in parts
+        ]
+
+        m = re.search(
+            r"(?:T|N)\s*(\d+)",
+            theme_raw,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            continue
+
+        theme_id = f"T{int(m.group(1))}"
+        if theme_id not in by_id:
+            continue
+
+        decision = decision_raw.upper()
+        if decision not in {"KEEP", "DROP"}:
+            continue
+
+        priority = priority_raw.lower()
+        if priority not in {
+            "high",
+            "medium",
+            "low",
+            "none",
+        }:
+            priority = (
+                "none"
+                if decision == "DROP"
+                else by_id[theme_id]["priority"]
+            )
+
+        evidence_ids = []
+        if evidence_raw != "-":
+            for token in re.split(
+                r"[,،;\s]+",
+                evidence_raw,
+            ):
+                token = token.strip().upper()
+                if (
+                    token in valid_fact_ids
+                    and token not in evidence_ids
+                ):
+                    evidence_ids.append(token)
+
+        evidence_ids = evidence_ids[:4]
+
+        reason = re.sub(
+            r"\s+",
+            " ",
+            reason_raw,
+        ).strip()
+
+        decisions[theme_id] = {
+            "decision": decision,
+            "priority": priority,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+        if decision == "KEEP" and evidence_ids:
+            original = by_id[theme_id]
+            validated.append({
+                "theme_id": theme_id,
+                "type": original["type"],
+                "priority": (
+                    original["priority"]
+                    if priority == "none"
+                    else priority
+                ),
+                "evidence_ids": evidence_ids,
+                "theme": original["theme"],
+            })
+
+    return validated, decisions
+
+
+def _v18_routing_cards(advisors):
+    cards = []
+
+    for advisor in advisors:
+        cards.append({
+            "system_code": advisor.get("system_code"),
+            "advisor_name": advisor.get(
+                "name_ar",
+                advisor.get("name_en"),
+            ),
+            "mission": advisor.get("mission"),
+            "owned_outcome": advisor.get("owned_outcome"),
+            "activation_when": advisor.get("activation_when"),
+            "not_primary_when": advisor.get("not_primary_when"),
+            "boundaries": advisor.get("boundaries"),
+            "typical_outputs": advisor.get("typical_outputs"),
+        })
+
+    return cards
+
+
+def _parse_v18_matches(
+    text,
+    valid_system_codes,
+    valid_theme_ids,
+    valid_fact_ids,
+):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    if not cleaned or cleaned.upper() == "NONE":
+        return []
+
+    matches = []
+    seen = set()
+
+    valid_relations = {
+        "DIRECT",
+        "COMPLEMENTARY",
+        "RELEVANT_OPTION",
+    }
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 5)
+        if len(parts) != 6:
+            continue
+
+        (
+            code_raw,
+            relation_raw,
+            score_raw,
+            themes_raw,
+            evidence_raw,
+            reason_raw,
+        ) = [p.strip() for p in parts]
+
+        system_code = code_raw.strip()
+        if (
+            system_code not in valid_system_codes
+            or system_code in seen
+        ):
+            continue
+
+        relation = relation_raw.upper()
+        if relation not in valid_relations:
+            continue
+
+        s_m = re.search(
+            r"\d+(?:\.\d+)?",
+            score_raw,
+        )
+        if not s_m:
+            continue
+
+        score = float(s_m.group())
+        if score <= 1:
+            score *= 100
+
+        score = max(
+            0.0,
+            min(100.0, score),
+        )
+
+        if score < 40:
+            continue
+
+        theme_ids = []
+        for token in re.split(
+            r"[,،;\s]+",
+            themes_raw,
+        ):
+            token = token.strip().upper()
+            if (
+                token in valid_theme_ids
+                and token not in theme_ids
+            ):
+                theme_ids.append(token)
+
+        evidence_ids = []
+        for token in re.split(
+            r"[,،;\s]+",
+            evidence_raw,
+        ):
+            token = token.strip().upper()
+            if (
+                token in valid_fact_ids
+                and token not in evidence_ids
+            ):
+                evidence_ids.append(token)
+
+        evidence_ids = evidence_ids[:4]
+
+        reason = re.sub(
+            r"\s+",
+            " ",
+            reason_raw,
+        ).strip()
+
+        if (
+            not theme_ids
+            or not evidence_ids
+            or not reason
+        ):
+            continue
+
+        matches.append({
+            "advisor_id": system_code,
+            "relation": relation,
+            "score": round(
+                score / 100.0,
+                4,
+            ),
+            "theme_ids": theme_ids,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        })
+
+        seen.add(system_code)
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return matches
+
+
+def advisory_match_rich_v18(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        f["fact_id"]
+        for f in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+    routing_cards = _v18_routing_cards(
+        advisors
+    )
+
+    # Pass 1: grounded needs + opportunities, without advisors.
+    print(
+        "Rich v18 pass 1: discovering grounded advisory themes...",
+        flush=True,
+    )
+
+    themes_raw, themes_tokens = _v18_generate_text(
+        RICH_V18_THEME_PROMPT,
+        {"facts": facts},
+        RICH_V18_THEME_MAX_NEW_TOKENS,
+    )
+
+    candidate_themes = _parse_v18_themes(
+        themes_raw,
+        valid_fact_ids,
+    )
+
+    # Pass 2: validate themes, still without advisors.
+    print(
+        f"Rich v18 pass 2: validating {len(candidate_themes)} themes...",
+        flush=True,
+    )
+
+    if candidate_themes:
+        review_raw, review_tokens = _v18_generate_text(
+            RICH_V18_THEME_REVIEW_PROMPT,
+            {
+                "facts": facts,
+                "candidate_themes": candidate_themes,
+            },
+            RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS,
+        )
+
+        validated_themes, theme_decisions = _parse_v18_theme_review(
+            review_raw,
+            candidate_themes,
+            valid_fact_ids,
+        )
+    else:
+        review_raw = "NONE"
+        review_tokens = 0
+        validated_themes = []
+        theme_decisions = {}
+
+    # Pass 3: global match using system_code identities.
+    if validated_themes:
+        print(
+            f"Rich v18 pass 3: matching 16 advisors to {len(validated_themes)} validated themes...",
+            flush=True,
+        )
+
+        match_raw, match_tokens = _v18_generate_text(
+            RICH_V18_MATCH_PROMPT,
+            {
+                "facts": facts,
+                "validated_themes": validated_themes,
+                "routing_cards": routing_cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+        matches = _parse_v18_matches(
+            match_raw,
+            {
+                card["system_code"]
+                for card in routing_cards
+                if card.get("system_code")
+            },
+            {
+                theme["theme_id"]
+                for theme in validated_themes
+            },
+            valid_fact_ids,
+        )
+    else:
+        match_raw = "NONE"
+        match_tokens = 0
+        matches = []
+
+    # Pass 4: if the evidence-backed choice pool is too narrow, expand THEMES,
+    # not advisors. This avoids inventing advisor relevance merely to hit a count.
+    expansion_raw = "NONE"
+    expansion_tokens = 0
+
+    if (
+        len(matches) < RICH_V18_DESIRED_CHOICE_POOL_MIN
+        and validated_themes
+    ):
+        print(
+            f"Rich v18 pass 4: pool has {len(matches)} advisors; "
+            "searching for overlooked grounded themes, not forcing advisors...",
+            flush=True,
+        )
+
+        expansion_raw, expansion_tokens = _v18_generate_text(
+            RICH_V18_THEME_EXPAND_PROMPT,
+            {
+                "facts": facts,
+                "validated_themes": validated_themes,
+            },
+            RICH_V18_THEME_EXPAND_MAX_NEW_TOKENS,
+        )
+
+        extra_candidates = _parse_v18_themes(
+            expansion_raw,
+            valid_fact_ids,
+        )
+
+        # Remove theme IDs already used and renumber extras safely.
+        existing_texts = {
+            t["theme"].strip().lower()
+            for t in validated_themes
+        }
+
+        filtered_extras = []
+        next_theme_number = (
+            max(
+                [
+                    int(
+                        re.search(r"\d+", t["theme_id"]).group()
+                    )
+                    for t in validated_themes
+                ],
+                default=0,
+            )
+            + 1
+        )
+
+        for item in extra_candidates:
+            if item["theme"].strip().lower() in existing_texts:
+                continue
+
+            item = dict(item)
+            item["theme_id"] = f"T{next_theme_number}"
+            next_theme_number += 1
+            filtered_extras.append(item)
+
+        if filtered_extras:
+            extra_review_raw, extra_review_tokens = _v18_generate_text(
+                RICH_V18_THEME_REVIEW_PROMPT,
+                {
+                    "facts": facts,
+                    "candidate_themes": filtered_extras,
+                },
+                RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS,
+            )
+
+            extra_validated, _ = _parse_v18_theme_review(
+                extra_review_raw,
+                filtered_extras,
+                valid_fact_ids,
+            )
+
+            if extra_validated:
+                validated_themes = (
+                    validated_themes
+                    + extra_validated
+                )
+
+                rematch_raw, rematch_tokens = _v18_generate_text(
+                    RICH_V18_MATCH_PROMPT,
+                    {
+                        "facts": facts,
+                        "validated_themes": validated_themes,
+                        "routing_cards": routing_cards,
+                    },
+                    RICH_V18_MATCH_MAX_NEW_TOKENS,
+                )
+
+                rematches = _parse_v18_matches(
+                    rematch_raw,
+                    {
+                        card["system_code"]
+                        for card in routing_cards
+                        if card.get("system_code")
+                    },
+                    {
+                        theme["theme_id"]
+                        for theme in validated_themes
+                    },
+                    valid_fact_ids,
+                )
+
+                if len(rematches) >= len(matches):
+                    matches = rematches
+
+    if len(matches) < RICH_V18_DESIRED_CHOICE_POOL_MIN:
+        print(
+            "Rich v18 warning: grounded data supports fewer than the desired "
+            f"{RICH_V18_DESIRED_CHOICE_POOL_MIN} advisor choices. "
+            "Returning only genuinely related advisors instead of fabricating relevance.",
+            flush=True,
+        )
+
+    # Exact public contract requested by the application.
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -5173,7 +6032,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v17(
+        return advisory_match_rich_v18(
             job_input
         )
 

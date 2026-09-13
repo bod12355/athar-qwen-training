@@ -922,7 +922,7 @@ def advisory_match_rich_v9(job_input):
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v9",
+        "routing_engine": "rich_ai_v10_1_global",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -935,6 +935,151 @@ def advisory_match_rich_v9(job_input):
     if job_input.get("debug", False):
         response["group_debug"] = debug_groups
 
+    return response
+
+
+RICH_V10_MAX_NEW_TOKENS = int(os.environ.get("RICH_V10_MAX_NEW_TOKENS", "1300"))
+
+RICH_V10_SYSTEM_PROMPT = """أنت Athar OS Global Rich Advisor Router v10.
+قارن الـ16 مستشارًا جميعًا معًا ثم أخرج فقط من لديهم قيمة استشارية مادية حقيقية الآن.
+
+السؤال الحاكم: هل وجود هذا المستشار الآن سيضيف قيمة مستقلة ومادية تدعمها الوقائع الحالية؟
+لا ترشح مستشارًا لأن تخصصه مهم عمومًا.
+
+مصادر الملاءمة المقبولة:
+- فجوة/مشكلة/مخاطرة صريحة.
+- حاجة مستنتجة مباشرة من الوقائع.
+- تعقيد تشغيلي/برامجي قائم يفعّل خبرة المستشار.
+- فرصة تحسين مادية واضحة ومسنودة.
+
+قواعد منع التضخيم:
+- لا يوجد عدد ثابت ولا تملأ القائمة.
+- الإنجاز السابق ليس فجوة حالية.
+- 16 لا يُرشح لمجرد درجة حوكمة مرتفعة أو وجود سياسات.
+- 5 لا يُرشح لمجرد ERP أو إعادة هيكلة دون تبنٍ/مقاومة/انتقال.
+- 11 لا يُرشح لمجرد وجود برامج قائمة؛ يلزم تصميم/إعادة تصميم/Pilot/فرضية تدخل.
+- 13 قد يُرشح عند كثرة البرامج وتداخلها وأولوياتها ومواردها.
+- 12 قد يُرشح عند وجود تعقيد تشغيلي أو موسمية أو جداول وموارد واعتماديات.
+- 15 يحتاج دليل نتائج/تقييم/أثر/تعلم؛ لا يكفي وجود برامج.
+- 14 يحتاج KPI/بيانات أداء/خط أساس/مستهدفات/لوحات؛ لا يكفي ERP أو نمو الإيرادات.
+- 6 يحتاج قضية جودة/اتساق/معايير/شكاوى/تحسين؛ لا تكفي الخدمات وحدها.
+- 7 يحتاج خطر/اعتمادية/استمرارية/تعطل؛ لا تكفي خدمة حرجة وحدها.
+- 3 يحتاج تحليل بيئة/اتجاهات/مقارنة/قرار توسع أو عدم يقين.
+- 4 يحتاج شركاء/أصحاب مصلحة/مانحين/اعتماد خارجي مدعوم.
+- 8 يحتاج قرارًا أو مراجعة أو مفاضلة استراتيجية حقيقية.
+- 10 يحتاج قضية أو أهداف استراتيجية تحتاج صياغة/ترابط.
+- 2 يحتاج تشخيص نضج/جاهزية/قدرات أو فجوة مؤسسية.
+- 1 يحتاج قرارًا تنفيذيًا متعدد الأبعاد أو ترتيب أولويات/موارد/ملكية.
+- 9 يحتاج سؤال هوية/غرض/رؤية/رسالة/قيم فعلي.
+- إذا كان مستشاران متجاوران يعالجان نفس الواقعة، احتفظ بكليهما فقط إذا كانت القيمة المستقلة واضحة.
+
+فرّق خصوصًا بين 14 و15، وبين 11 و12 و13، وبين 1 و16، وبين 2 و8، وبين 5 و6.
+
+SCORE:
+90-100 محوري جدًا
+80-89 قوي
+70-79 واضح
+55-69 مساند مادي
+40-54 محدود لكنه حقيقي
+أقل من 40 لا تخرجه
+
+ROLE = core أو supporting
+
+أخرج فقط:
+ADVISOR_ID|SCORE|ROLE|EVIDENCE_IDS|REASON
+
+EVIDENCE_IDS من 1 إلى 3 ويجب أن تكون موجودة في FACTS.
+REASON جملة عربية قصيرة لا تتجاوز 16 كلمة.
+إذا لم يوجد أحد اكتب NONE.
+ممنوع JSON وممنوع Markdown وأي شرح إضافي.
+"""
+
+def generate_rich_v10_global(facts, advisors):
+    import torch
+    messages = [
+        {"role": "system", "content": RICH_V10_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps({"facts": facts, "advisors": advisors}, ensure_ascii=False)},
+    ]
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
+    encoded = _RICH_TOKENIZER(prompt, return_tensors="pt", add_special_tokens=False)
+    input_tokens = int(encoded["attention_mask"].sum().item())
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(f"Rich v10 global input too long: {input_tokens}")
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+    print(f"Rich v10 global input tokens: {input_tokens}", flush=True)
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V10_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    return _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True), input_tokens
+
+def advisory_match_rich_v10(job_input):
+    organization, programs = normalize_advisory_input(job_input.get("input", {}))
+    ensure_rich_router_model()
+    facts = build_rich_facts(organization, programs)
+    valid_fact_ids = {f["fact_id"] for f in facts}
+    print("Rich v10: globally comparing all 16 advisors...", flush=True)
+    raw_text, input_tokens = generate_rich_v10_global(facts, _RICH_REGISTRY["advisors"])
+    ranked_internal = _parse_rich_v9_lines(
+        raw_text,
+        set(range(1, 17)),
+        valid_fact_ids,
+    )
+    ranked_internal.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    advisor_by_number = {
+        int(advisor["advisor_id"]): advisor
+        for advisor in _RICH_REGISTRY["advisors"]
+    }
+
+    ranked = []
+
+    for item in ranked_internal:
+        advisor_number = int(item["advisor_id"])
+        advisor = advisor_by_number[advisor_number]
+
+        ranked.append({
+            "advisor_id": advisor.get(
+                "system_code",
+                str(advisor_number),
+            ),
+            "advisor_name": advisor.get(
+                "name_ar",
+                advisor.get("name_en"),
+            ),
+            "score": item["score"],
+            "role": item["role"],
+            "evidence_ids": item["evidence_ids"],
+            "reason": item["reason"],
+        })
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "rich_ai_v10_1_global",
+        "model": MATCHER_BASE_MODEL,
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": 16,
+        "matched_advisors": len(ranked),
+        "input_tokens": input_tokens,
+        "ranked": ranked,
+    }
+    if job_input.get("debug", False):
+        response["raw_output"] = raw_text
     return response
 
 
@@ -2877,7 +3022,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v9(
+        return advisory_match_rich_v10(
             job_input
         )
 

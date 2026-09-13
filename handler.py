@@ -196,6 +196,589 @@ role يجب أن يكون primary أو supporting.
 """
 
 
+
+# ---------------------------------------------------------------------
+# Rich AI Router v8
+# The model evaluates ALL 16 advisors together using rich Expert DNA.
+# There is NO deterministic need gate and NO hard-coded advisor mapping.
+# ---------------------------------------------------------------------
+
+RICH_REGISTRY_PATH = os.environ.get(
+    "RICH_REGISTRY_PATH",
+    f"{ROOT}/data/advisors_registry_rich_v3.json"
+)
+
+RICH_MAX_INPUT_TOKENS = int(
+    os.environ.get("RICH_MAX_INPUT_TOKENS", "20000")
+)
+
+RICH_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_MAX_NEW_TOKENS", "1050")
+)
+
+RICH_MIN_RELEVANT_SCORE = float(
+    os.environ.get("RICH_MIN_RELEVANT_SCORE", "0.40")
+)
+
+_RICH_MODEL = None
+_RICH_TOKENIZER = None
+_RICH_REGISTRY = None
+_RICH_DEVICE = None
+
+RICH_ROUTER_SYSTEM_PROMPT = """أنت Athar OS Rich Advisor Router.
+
+هذه مرحلة اكتشاف الملاءمة قبل أن تختار الجمعية ستة مستشارين.
+مهمتك ليست اختيار أقل عدد من المستشارين، وليست تكوين مجلس نهائي.
+مهمتك هي تقييم الـ16 مستشارًا جميعًا وإرجاع كل مستشار له قيمة مادية حقيقية للحالة الحالية.
+
+قواعد حاسمة:
+1) قيّم جميع المستشارين في مقارنة عالمية واحدة باستخدام ملفات Expert DNA الغنية.
+2) لا تشترط أن تقول المنظمة "لدينا مشكلة" أو "نحتاج". الملاءمة قد تأتي من:
+   - فجوة أو مخاطرة صريحة.
+   - حاجة مستنتجة مباشرة من الوقائع.
+   - تعقيد تشغيلي/برامجي قائم فعليًا.
+   - فرصة تحسين أو قرار مهم يظهر من حجم وتنوع العمل.
+3) لا تعتبر إنجازًا سابقًا وحده دليلاً على وجود فجوة حالية.
+4) Supporting relevance مقبول إذا كان المستشار سيضيف قيمة مادية مستقلة، وليس مجرد علاقة هامشية.
+5) لا يوجد عدد ثابت. قد يكون المناسب 2 أو 4 أو 7 أو أكثر.
+6) لا تطبق Minimum Expert Principle في هذه المرحلة؛ الاختيار النهائي يتم لاحقًا.
+7) لا تخترع احتياجًا أو معلومة. كل relevant=true يجب أن يستند إلى evidence_ids موجودة في FACTS.
+8) activation_when دليل إيجابي. not_primary_when وboundaries تمنع تضخيم الدور لكنها لا تمنع دورًا مساندًا حقيقيًا.
+9) فرّق بدقة بين المجالات المتجاورة:
+   - 14 KPI/Dashboard مقابل 15 MEAL/Impact.
+   - 11 Initiative Design مقابل 12 Operational Planning مقابل 13 Portfolio/Program/Project.
+   - 1 Executive Leadership مقابل 16 Governance/Compliance.
+   - 2 Institutional Diagnosis مقابل 8 Strategic Planning.
+   - 5 Change/Adoption مقابل 6 Quality/Continuous Improvement.
+10) قيّم واقع المنظمة كله: عدد البرامج، تنوعها، المواسم، الفئات، التوسع، الأنظمة، الحوكمة، القياس، الشراكات، المخاطر، والقرارات الظاهرة.
+
+معايرة score:
+0.85-1.00 = ملاءمة محورية وواضحة
+0.70-0.84 = ملاءمة قوية
+0.50-0.69 = دور مساند مادي
+0.40-0.49 = قيمة محدودة لكن حقيقية
+أقل من 0.40 = غالبًا غير مناسب
+
+role:
+core = المستشار يعالج بعدًا رئيسيًا ظاهرًا في الحالة
+supporting = يضيف بعدًا مساندًا ماديًا
+none = غير مناسب
+
+أخرج JSON فقط.
+يجب أن تحتوي evaluations على 16 صفًا بالضبط، واحد لكل advisor_id من 1 إلى 16.
+اجعل reason قصيرة جدًا، بحد أقصى 18 كلمة.
+اجعل evidence_ids من 1 إلى 3 فقط.
+
+{
+  "evaluations": [
+    {
+      "advisor_id": 1,
+      "relevant": true,
+      "score": 0.82,
+      "role": "core",
+      "evidence_ids": ["F2", "P3"],
+      "reason": "سبب عربي قصير ومحدد"
+    }
+  ]
+}
+"""
+
+
+def build_rich_facts(organization, programs):
+
+    facts = []
+
+    def add_fact(fid, source, value):
+        if value is None:
+            return
+
+        if isinstance(value, (list, dict)):
+            text = json.dumps(
+                value,
+                ensure_ascii=False
+            )
+        else:
+            text = str(value).strip()
+
+        if text:
+            facts.append({
+                "fact_id": fid,
+                "source": source,
+                "text": text,
+            })
+
+    add_fact("F1", "organization.name", organization.get("name"))
+    add_fact("F2", "organization.type", organization.get("type"))
+    add_fact("F3", "organization.sector", organization.get("sector"))
+    add_fact("F4", "organization.activity_fields", organization.get("activity_fields"))
+    add_fact("F5", "organization.short_description", organization.get("short_description"))
+    add_fact("F6", "organization.detailed_description", organization.get("detailed_description"))
+    add_fact("F7", "organization.competitive_advantage", organization.get("competitive_advantage"))
+    add_fact("F8", "organization.important_notes", organization.get("important_notes"))
+
+    for index, program in enumerate(programs, start=1):
+        if not isinstance(program, dict):
+            continue
+
+        parts = []
+
+        for key in [
+            "name",
+            "type",
+            "description",
+            "target_audience",
+            "beneficiary_value",
+            "delivery_method",
+        ]:
+            value = program.get(key)
+
+            if value is not None and str(value).strip():
+                parts.append(
+                    f"{key}={str(value).strip()}"
+                )
+
+        if parts:
+            facts.append({
+                "fact_id": f"P{index}",
+                "source": f"programs[{index - 1}]",
+                "text": " | ".join(parts),
+            })
+
+    return facts
+
+
+def load_rich_registry():
+
+    if not os.path.isfile(RICH_REGISTRY_PATH):
+        raise RuntimeError(
+            f"Rich advisor registry not found: {RICH_REGISTRY_PATH}"
+        )
+
+    with open(
+        RICH_REGISTRY_PATH,
+        "r",
+        encoding="utf-8",
+    ) as file:
+        registry = json.load(file)
+
+    advisors = registry.get("advisors", [])
+
+    if len(advisors) != 16:
+        raise RuntimeError(
+            f"Rich registry must contain exactly 16 advisors; got {len(advisors)}"
+        )
+
+    return registry
+
+
+def ensure_rich_router_model():
+
+    global _RICH_MODEL
+    global _RICH_TOKENIZER
+    global _RICH_REGISTRY
+    global _RICH_DEVICE
+
+    if (
+        _RICH_MODEL is not None
+        and _RICH_TOKENIZER is not None
+        and _RICH_REGISTRY is not None
+    ):
+        return
+
+    print(
+        "Loading Qwen3-14B for rich AI advisor routing...",
+        flush=True,
+    )
+
+    started = time.time()
+
+    import torch
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        BitsAndBytesConfig,
+    )
+
+    _RICH_REGISTRY = load_rich_registry()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        MATCHER_BASE_MODEL,
+        use_fast=True,
+    )
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    tokenizer.padding_side = "left"
+
+    compute_dtype = (
+        torch.bfloat16
+        if torch.cuda.is_available()
+        else torch.float32
+    )
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=compute_dtype,
+    )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MATCHER_BASE_MODEL,
+        quantization_config=quantization_config,
+        torch_dtype=compute_dtype,
+        device_map={"": 0},
+        attn_implementation="flash_attention_2",
+    )
+
+    model.eval()
+
+    _RICH_MODEL = model
+    _RICH_TOKENIZER = tokenizer
+    _RICH_DEVICE = next(model.parameters()).device
+
+    print(
+        f"Rich AI router ready in {round(time.time() - started, 2)}s",
+        flush=True,
+    )
+
+
+def _extract_first_json_object(text):
+
+    cleaned = (
+        str(text)
+        .strip()
+        .replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+
+    if start >= 0 and end > start:
+        try:
+            return json.loads(
+                cleaned[start:end + 1]
+            )
+        except Exception:
+            pass
+
+    raise ValueError(
+        f"Rich router did not return valid JSON. Raw: {cleaned[:1200]}"
+    )
+
+
+def generate_rich_evaluations(
+    organization,
+    programs,
+):
+
+    import torch
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    payload = {
+        "organization_name": organization.get("name"),
+        "facts": facts,
+        "advisors": _RICH_REGISTRY["advisors"],
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": RICH_ROUTER_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(
+        encoded["attention_mask"].sum().item()
+    )
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich router input too long: "
+            f"{input_tokens} > {RICH_MAX_INPUT_TOKENS}"
+        )
+
+    encoded = {
+        key: value.to(_RICH_DEVICE)
+        for key, value in encoded.items()
+    }
+
+    print(
+        f"Rich routing input tokens: {input_tokens}",
+        flush=True,
+    )
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.05,
+            no_repeat_ngram_size=8,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    raw_text = _RICH_TOKENIZER.decode(
+        generated[0],
+        skip_special_tokens=True,
+    )
+
+    parsed = _extract_first_json_object(
+        raw_text
+    )
+
+    return {
+        "parsed": parsed,
+        "facts": facts,
+        "input_tokens": input_tokens,
+        "raw_text": raw_text,
+    }
+
+
+def normalize_rich_evaluations(
+    parsed,
+    facts,
+):
+
+    valid_ids = set(range(1, 17))
+    fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    raw_evaluations = parsed.get(
+        "evaluations",
+        []
+    )
+
+    if not isinstance(raw_evaluations, list):
+        raise ValueError(
+            "Rich router output missing evaluations list."
+        )
+
+    by_id = {}
+
+    for row in raw_evaluations:
+
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            advisor_id = int(
+                row.get("advisor_id")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if advisor_id not in valid_ids:
+            continue
+
+        try:
+            score = float(
+                row.get("score", 0.0)
+            )
+        except (TypeError, ValueError):
+            score = 0.0
+
+        score = max(
+            0.0,
+            min(1.0, score),
+        )
+
+        relevant = bool(
+            row.get("relevant", False)
+        )
+
+        # Keep the model decision but make impossible combinations consistent.
+        if score < RICH_MIN_RELEVANT_SCORE:
+            relevant = False
+
+        role = str(
+            row.get(
+                "role",
+                "none"
+            )
+        ).strip().lower()
+
+        if role not in {
+            "core",
+            "supporting",
+            "none",
+        }:
+            role = (
+                "supporting"
+                if relevant
+                else "none"
+            )
+
+        if not relevant:
+            role = "none"
+
+        evidence_ids = row.get(
+            "evidence_ids",
+            []
+        )
+
+        if not isinstance(
+            evidence_ids,
+            list,
+        ):
+            evidence_ids = []
+
+        evidence_ids = [
+            str(fid)
+            for fid in evidence_ids
+            if str(fid) in fact_ids
+        ][:3]
+
+        # A selected advisor must have real evidence.
+        if relevant and not evidence_ids:
+            relevant = False
+            role = "none"
+
+        reason = re.sub(
+            r"\s+",
+            " ",
+            str(row.get("reason", "")).strip(),
+        )
+
+        if len(reason.split()) > 22:
+            reason = (
+                " ".join(reason.split()[:22])
+                .rstrip("،,.")
+                + "."
+            )
+
+        by_id[advisor_id] = {
+            "advisor_id": advisor_id,
+            "relevant": relevant,
+            "score": round(score, 4),
+            "role": role,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+    # We require explicit evaluation of all 16 to avoid silent false negatives.
+    missing_ids = [
+        advisor_id
+        for advisor_id in range(1, 17)
+        if advisor_id not in by_id
+    ]
+
+    if missing_ids:
+        raise ValueError(
+            "Rich router did not evaluate all advisors. "
+            f"Missing IDs: {missing_ids}"
+        )
+
+    evaluations = [
+        by_id[advisor_id]
+        for advisor_id in range(1, 17)
+    ]
+
+    return evaluations
+
+
+def advisory_match_rich_v8(
+    job_input,
+):
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    print(
+        "Evaluating all 16 advisors with rich Expert DNA...",
+        flush=True,
+    )
+
+    result = generate_rich_evaluations(
+        organization,
+        programs,
+    )
+
+    evaluations = normalize_rich_evaluations(
+        result["parsed"],
+        result["facts"],
+    )
+
+    ranked = [
+        {
+            "advisor_id": row["advisor_id"],
+            "score": row["score"],
+            "role": row["role"],
+            "reason": row["reason"],
+            "evidence_ids": row["evidence_ids"],
+        }
+        for row in evaluations
+        if row["relevant"]
+    ]
+
+    ranked.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "rich_ai_v8",
+        "model": MATCHER_BASE_MODEL,
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": 16,
+        "matched_advisors": len(ranked),
+        "input_tokens": result["input_tokens"],
+        "ranked": ranked,
+    }
+
+    if job_input.get("debug", False):
+        response["evaluations"] = evaluations
+
+    return response
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -2110,13 +2693,6 @@ def training_preflight(
 
 def handler(job):
 
-    token = os.environ.get("GITHUB_TOKEN")
-
-    if not token:
-        raise RuntimeError(
-            "GITHUB_TOKEN environment variable is missing."
-        )
-
     job_input = job.get("input", {})
 
     if not isinstance(job_input, dict):
@@ -2126,21 +2702,34 @@ def handler(job):
 
     request_type = job_input.get("type")
 
-    # Runtime request route.
+    # Production inference no longer needs GitHub access.
     if request_type == "advisory_match":
 
         if job_input.get("preflight", False):
-            return advisory_match_preflight(
-                job_input,
-                token,
-            )
+            registry = load_rich_registry()
 
-        return advisory_match_grounded_v5(
-            job_input,
-            token,
+            return {
+                "status": "advisory_match_preflight_ok",
+                "routing_engine": "rich_ai_v8",
+                "model": MATCHER_BASE_MODEL,
+                "registry_path": RICH_REGISTRY_PATH,
+                "advisor_count": len(
+                    registry.get("advisors", [])
+                ),
+            }
+
+        return advisory_match_rich_v8(
+            job_input
         )
 
-    # Training route.
+    # Training routes still require GitHub.
+    token = os.environ.get("GITHUB_TOKEN")
+
+    if not token:
+        raise RuntimeError(
+            "GITHUB_TOKEN environment variable is missing."
+        )
+
     training_type = job_input.get(
         "training_type"
     )
@@ -2172,89 +2761,64 @@ def handler(job):
     )
 
     if job_input.get("preflight", False):
-        return training_preflight(
+        return training_preflight_response(
             training_type,
             checkpoint_path,
         )
 
-    validate_training_files(
-        training_type
+    clean_previous_outputs(
+        info["output_dir"]
     )
 
-    # Avoid stale output if the same worker processes another run.
-    if training_type == "matcher":
-        shutil.rmtree(
-            info["output_dir"],
-            ignore_errors=True
-        )
-
-    os.makedirs(
-        info["output_dir"],
-        exist_ok=True
-    )
-
-    command = [
-        "axolotl",
-        "train",
+    cmd = [
+        "/workspace/axolotl-venv/bin/accelerate",
+        "launch",
+        "-m",
+        "axolotl.cli.train",
         info["config"],
     ]
 
-    # base/meta/specialist continue the same training run.
-    # matcher v2 refines the current matcher LoRA weights via lora_model_dir.
     if info["resume"]:
-        command.extend(
-            [
-                "--resume-from-checkpoint",
-                checkpoint_path,
-            ]
-        )
+        cmd.extend([
+            "--resume-from-checkpoint",
+            checkpoint_path,
+        ])
 
-    requested_epochs = job_input.get("num_epochs")
+    env = os.environ.copy()
 
-    if requested_epochs is not None:
-
-        requested_epochs = int(requested_epochs)
-
-        if requested_epochs < 1:
-            raise ValueError(
-                "num_epochs must be >= 1"
-            )
-
-        command.extend(
-            [
-                "--num-epochs",
-                str(requested_epochs),
-            ]
-        )
+    env["PYTHONUNBUFFERED"] = "1"
 
     print(
         f"Starting {training_type} training...",
         flush=True
     )
 
-    print(
-        "Command: " + " ".join(command),
-        flush=True
-    )
-
-    training_tail = run_command(
-        command,
+    log_tail = run_command(
+        cmd,
+        cwd=ROOT,
+        env=env,
         stream=True,
     )
 
-    new_checkpoint = latest_checkpoint(
+    latest_checkpoint = find_latest_checkpoint(
         info["output_dir"]
     )
 
     print(
-        f"New checkpoint: {new_checkpoint}",
+        f"Latest checkpoint: {latest_checkpoint}",
         flush=True
     )
 
-    commit_sha = push_checkpoint(
-        training_type,
+    save_checkpoint_to_repo(
         repo_dir,
-        new_checkpoint,
+        latest_checkpoint,
+        info["target_checkpoint_rel"],
+    )
+
+    commit_sha = push_checkpoint_to_github(
+        repo_dir,
+        info["target_checkpoint_rel"],
+        training_type,
         git_env,
     )
 
@@ -2262,12 +2826,13 @@ def handler(job):
         "status": "completed",
         "training_type": training_type,
         "checkpoint": os.path.basename(
-            new_checkpoint
+            latest_checkpoint
         ),
         "saved_to": info["target_checkpoint_rel"],
         "github_commit": commit_sha,
-        "log_tail": training_tail[-4000:],
+        "log_tail": log_tail,
     }
+
 
 
 runpod.serverless.start({

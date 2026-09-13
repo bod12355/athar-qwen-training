@@ -922,7 +922,7 @@ def advisory_match_rich_v9(job_input):
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v15_1_payload_contract",
+        "routing_engine": "rich_ai_v16_relation_class",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -2162,81 +2162,65 @@ RICH_V15_REVIEW_MAX_NEW_TOKENS = int(
     os.environ.get("RICH_V15_REVIEW_MAX_NEW_TOKENS", "850")
 )
 
-RICH_V15_REVIEW_PROMPT = """أنت Athar OS Advisor Relevance Adjudicator.
+RICH_V16_REVIEW_PROMPT = """أنت Athar OS Advisor Relevance Judge v16.
 
-ستستلم:
-1) FACTS موثقة.
-2) VALIDATED_NEEDS مؤكدة.
-3) PROPOSED_MATCHES من مرحلة مطابقة أولية.
-4) ملفات Expert DNA للمستشارين المقترحين.
+ستستلم FACTS وVALIDATED_NEEDS وPROPOSED_MATCHES وملفات Expert DNA للمستشارين المقترحين.
 
-هدفك ليس تقليل العدد، وليس اختيار "أقل عدد كافٍ".
-هدفك الوحيد: الاحتفاظ بكل مستشار مرتبط فعلاً وبشكل مادي باحتياجات الجمعية المؤكدة، واستبعاد العلاقات العامة أو الافتراضية.
+هدفك الوحيد هو تحديد درجة الصلة الحقيقية لكل مستشار بالاحتياجات المؤكدة.
+لا تقلل العدد ولا تكبره. العدد غير مهم.
 
-قاعدة KEEP:
-احتفظ بالمستشار إذا كان لديه دور مباشر أو مساند مادي في معالجة واحد أو أكثر من VALIDATED_NEEDS، وكانت مساهمته واضحة من owned_outcome / core_scope / activation_when.
+صنّف كل مستشار في واحدة فقط من:
+DIRECT = الاحتياج يقع مباشرة داخل owned_outcome / core_scope للمستشار.
+MATERIAL_SUPPORT = للمستشار مساهمة مستقلة ومادية واضحة في نفس الاحتياج، وليست مجرد مساعدة عامة.
+ADJACENT = المجال قريب أو قد يساعد، لكن لا يوجد مخرج مستقل مطلوب من الاحتياج الحالي.
+UNRELATED = لا توجد صلة حقيقية بالاحتياج المؤكد.
 
-مهم:
-- يمكن أن يحتفظ أكثر من مستشار لنفس الاحتياج إذا كانت مساهمة كل واحد مختلفة فعلاً ومادية.
-- لا تسقط مستشارًا فقط لأن مستشارًا آخر أكثر تخصصًا.
-- لا يوجد حد أدنى أو أقصى لعدد المستشارين.
-- لا تطبق Minimum Expert Principle.
-- لا تحاول جعل القائمة قصيرة.
-- لا تحاول جعل القائمة كبيرة.
-- المعيار الوحيد هو: هل هذا المستشار related فعلاً للاحتياج الحالي؟
+النتيجة النهائية:
+- DIRECT => KEEP
+- MATERIAL_SUPPORT => KEEP
+- ADJACENT => DROP
+- UNRELATED => DROP
 
-DROP إذا:
-- العلاقة عامة أو بعيدة أو من الدرجة الثانية.
-- السبب هو فقط أن "هذا المجال مفيد عادة".
-- يلزم اختراع فجوة أو مشكلة غير موجودة في VALIDATED_NEEDS.
-- مساهمة المستشار لا تضيف شيئًا ماديًا للاحتياج الحالي.
-- المستشار مرتبط فقط بموضوع قريب لغويًا وليس بنطاق عمله الحقيقي.
+اختبار المساهمة المستقلة:
+لا يكفي أن يستطيع المستشار "المساعدة".
+يجب أن تستطيع تسمية مخرج مستقل سيقدمه لمعالجة VALIDATED_NEED نفسه.
+إذا كان السبب يعيد صياغة الاحتياج فقط دون مخرج مختلف، صنّفه ADJACENT.
 
-قواعد تمييز مهمة:
-- إدارة المحفظة/الأولويات/الاعتماديات قد ترتبط مباشرة بـ13.
-  ويمكن أن يرتبط 1 أو 8 أو 10 فقط إذا كان نفس الاحتياج يتضمن فعلًا قرارًا تنفيذيًا، مفاضلة استراتيجية، أو معمار أهداف يحتاج مساهمتهم.
-- التخطيط التشغيلي/المواسم/الجداول/الموارد يرتبط مباشرة بـ12.
-  ويمكن أن يرتبط 13 إذا كانت هناك اعتماديات بين البرامج أو توزيع موارد على مستوى المحفظة.
-  ولا يرتبط 5 إلا إذا كان هناك تبنٍ/مقاومة/تحول فعلي.
-  ولا يرتبط 7 إلا إذا كان هناك خطر/استمرارية/تعطل فعلي.
-- 14 يحتاج احتياجًا متعلقًا بالـKPI/القياس/الخط الأساس/المستهدفات/اللوحات.
-- 15 يحتاج احتياجًا متعلقًا بالتقييم/الأثر/النتائج/التعلم.
-- 16 يحتاج احتياجًا متعلقًا بالحوكمة/الامتثال/الصلاحيات/السياسات.
-- 6 يحتاج احتياجًا متعلقًا بالجودة/المعايير/التحسين.
-- 11 يحتاج احتياجًا متعلقًا بتصميم/إعادة تصميم مبادرة أو Pilot.
-- 4 يحتاج احتياجًا متعلقًا بأصحاب المصلحة/الشراكات.
-- 3 يحتاج احتياجًا متعلقًا بالتحليل البيئي/الاتجاهات/المقارنة.
-- 2 يحتاج احتياجًا متعلقًا بالتشخيص/النضج/الجاهزية.
-- 9 يحتاج احتياجًا متعلقًا بالهوية/الرؤية/الرسالة/القيم.
+أمثلة حاسمة:
+- إدارة المحفظة والأولويات والاعتماديات بين البرامج:
+  13 DIRECT.
+  1 لا يصبح MATERIAL_SUPPORT إلا إذا كان الاحتياج يتطلب فعلًا قرارًا تنفيذيًا/تخصيص موارد/ملكية تنفيذية مستقلة، وليس لمجرد كلمة "أولويات".
+  8 لا يصبح MATERIAL_SUPPORT إلا إذا كان هناك اختيار/مفاضلة استراتيجية فعلية، لا مجرد ترتيب برامج.
+  3 لا يصبح MATERIAL_SUPPORT إلا إذا كان هناك تحليل بيئي/اتجاهات/مقارنة مطلوب فعلًا.
+  10 لا يصبح MATERIAL_SUPPORT إلا إذا كان هناك صياغة قضايا/أهداف استراتيجية مطلوبة.
+- التخطيط التشغيلي والمواسم والجداول والموارد:
+  12 DIRECT.
+  13 يمكن أن يكون MATERIAL_SUPPORT إذا كان هناك اعتماديات أو موارد على مستوى المحفظة.
+  5 ليس related إلا مع تبنٍ/مقاومة/تحول.
+  7 ليس related إلا مع خطر/استمرارية/تعطل.
+- 14 يحتاج KPI/قياس/مستهدفات/لوحات.
+- 15 يحتاج تقييم/أثر/نتائج/تعلم.
+- 16 يحتاج حوكمة/امتثال/صلاحيات/سياسات.
+- 6 يحتاج جودة/معايير/تحسين.
+- 11 يحتاج تصميم/إعادة تصميم مبادرة.
+- 4 يحتاج أصحاب مصلحة/شراكات.
+- 2 يحتاج تشخيص/نضج/جاهزية.
+- 9 يحتاج هوية/رؤية/رسالة/قيم.
 
-اختبار سريع لكل مستشار:
-1) هل يوجد VALIDATED_NEED يطابق نطاقه فعلاً؟
-2) هل يستطيع تقديم مخرج أو قرار أو تحسين مادي لهذا الاحتياج؟
-3) هل السبب مدعوم بالوقائع دون افتراض إضافي؟
-
-إذا نعم بوضوح => KEEP.
-إذا لا => DROP.
+ممنوع اختراع احتياج جديد.
+ممنوع استخدام FACTS لتبرير مجال غير موجود في VALIDATED_NEEDS.
+ممنوع الاحتفاظ بمستشار لمجرد أنه senior أو عام أو "مفيد".
 
 أخرج سطرًا لكل مستشار مقترح:
-ADVISOR_ID|KEEP_OR_DROP|FINAL_SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
+ADVISOR_ID|RELATION|FINAL_SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
 
-KEEP_OR_DROP = KEEP أو DROP
-FINAL_SCORE من 0 إلى 100
+RELATION = DIRECT أو MATERIAL_SUPPORT أو ADJACENT أو UNRELATED
 ROLE = core أو supporting أو none
-MATCHED_NEED_IDS من VALIDATED_NEEDS فقط
-EVIDENCE_IDS من FACTS فقط، 1-3 عند KEEP، ويمكن - عند DROP
-REASON جملة عربية قصيرة توضّح صلة المستشار الفعلية بالاحتياج
+DIRECT/MATERIAL_SUPPORT يجب أن يكون له matched_need_ids وevidence_ids صحيحة.
+ADJACENT/UNRELATED => ROLE=none وFINAL_SCORE أقل من 40.
+REASON يجب أن يذكر الصلة الفعلية أو سبب عدم كفايتها بجملة عربية قصيرة.
 
-إذا KEEP:
-- FINAL_SCORE >= 40
-- يجب وجود matched_need_ids
-- يجب وجود evidence_ids
-
-إذا DROP:
-- FINAL_SCORE < 40
-- ROLE = none
-
-ممنوع JSON وممنوع Markdown وممنوع أي شرح خارج السطور.
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
 """
 
 
@@ -2251,7 +2235,7 @@ def generate_rich_v15_review(
     messages = [
         {
             "role": "system",
-            "content": RICH_V15_REVIEW_PROMPT,
+            "content": RICH_V16_REVIEW_PROMPT,
         },
         {
             "role": "user",
@@ -2286,7 +2270,7 @@ def generate_rich_v15_review(
 
     if input_tokens > RICH_MAX_INPUT_TOKENS:
         raise ValueError(
-            f"Rich v15 review input too long: {input_tokens}"
+            f"Rich v16 review input too long: {input_tokens}"
         )
 
     encoded = {
@@ -2295,7 +2279,7 @@ def generate_rich_v15_review(
     }
 
     print(
-        f"Rich v15 ownership review input tokens: {input_tokens}",
+        f"Rich v16 ownership review input tokens: {input_tokens}",
         flush=True,
     )
 
@@ -2324,7 +2308,8 @@ def generate_rich_v15_review(
     return raw_text, input_tokens
 
 
-def _parse_v15_review(
+
+def _parse_v16_review(
     text,
     proposed_ids,
     valid_need_ids,
@@ -2351,7 +2336,7 @@ def _parse_v15_review(
 
         (
             advisor_raw,
-            decision_raw,
+            relation_raw,
             score_raw,
             role_raw,
             needs_raw,
@@ -2366,12 +2351,16 @@ def _parse_v15_review(
             continue
 
         advisor_id = int(a_m.group())
-
         if advisor_id not in proposed_ids:
             continue
 
-        decision = decision_raw.upper()
-        if decision not in {"KEEP", "DROP"}:
+        relation = relation_raw.upper()
+        if relation not in {
+            "DIRECT",
+            "MATERIAL_SUPPORT",
+            "ADJACENT",
+            "UNRELATED",
+        }:
             continue
 
         score = float(s_m.group())
@@ -2381,7 +2370,7 @@ def _parse_v15_review(
 
         role = role_raw.lower()
         if role not in {"core", "supporting", "none"}:
-            role = "none" if decision == "DROP" else "supporting"
+            role = "none"
 
         matched_need_ids = []
         if needs_raw != "-":
@@ -2400,33 +2389,40 @@ def _parse_v15_review(
 
         reason = re.sub(r"\s+", " ", reason_raw).strip()
 
-        final_decision = decision
+        should_keep = relation in {"DIRECT", "MATERIAL_SUPPORT"}
 
-        if decision == "KEEP":
-            if score < 40 or not matched_need_ids or not evidence_ids:
-                final_decision = "DROP"
-                role = "none"
+        # Schema/evidence validation only; semantic decision remains AI-made.
+        if should_keep:
+            if not matched_need_ids or not evidence_ids:
+                should_keep = False
             else:
+                if score < 40:
+                    score = 40.0
                 if role == "none":
-                    role = "supporting"
-
-                kept.append({
-                    "advisor_id": advisor_id,
-                    "score": round(score / 100.0, 4),
-                    "role": role,
-                    "matched_need_ids": matched_need_ids,
-                    "evidence_ids": evidence_ids,
-                    "reason": reason,
-                })
+                    role = "core" if relation == "DIRECT" else "supporting"
+        else:
+            score = min(score, 39.0)
+            role = "none"
 
         decisions[advisor_id] = {
-            "decision": final_decision,
+            "relation": relation,
+            "kept": should_keep,
             "score": round(score / 100.0, 4),
             "role": role,
             "matched_need_ids": matched_need_ids,
             "evidence_ids": evidence_ids,
             "reason": reason,
         }
+
+        if should_keep:
+            kept.append({
+                "advisor_id": advisor_id,
+                "score": round(score / 100.0, 4),
+                "role": role,
+                "matched_need_ids": matched_need_ids,
+                "evidence_ids": evidence_ids,
+                "reason": reason,
+            })
 
     kept.sort(
         key=lambda x: x["score"],
@@ -2436,7 +2432,7 @@ def _parse_v15_review(
     return kept, decisions
 
 
-def advisory_match_rich_v15(job_input):
+def advisory_match_rich_v16(job_input):
     organization, programs = normalize_advisory_input(
         job_input.get("input", {})
     )
@@ -2457,7 +2453,7 @@ def advisory_match_rich_v15(job_input):
 
     # Pass 1: need discovery
     print(
-        "Rich v15 pass 1/4: discovering needs without advisors...",
+        "Rich v16 pass 1/4: discovering needs without advisors...",
         flush=True,
     )
 
@@ -2472,7 +2468,7 @@ def advisory_match_rich_v15(job_input):
 
     # Pass 2: need validation
     print(
-        f"Rich v15 pass 2/4: validating {len(candidate_needs)} candidate needs...",
+        f"Rich v16 pass 2/4: validating {len(candidate_needs)} candidate needs...",
         flush=True,
     )
 
@@ -2496,7 +2492,7 @@ def advisory_match_rich_v15(job_input):
     # Pass 3: broad global matching proposal
     if validated_needs:
         print(
-            "Rich v15 pass 3/4: proposing advisors globally...",
+            "Rich v16 pass 3/4: proposing advisors globally...",
             flush=True,
         )
 
@@ -2535,7 +2531,7 @@ def advisory_match_rich_v15(job_input):
         ]
 
         print(
-            f"Rich v15 pass 4/4: ownership review of {len(proposed_matches)} proposed advisors...",
+            f"Rich v16 pass 4/4: ownership review of {len(proposed_matches)} proposed advisors...",
             flush=True,
         )
 
@@ -2546,7 +2542,7 @@ def advisory_match_rich_v15(job_input):
             proposed_profiles,
         )
 
-        kept_internal, ownership_decisions = _parse_v15_review(
+        kept_internal, ownership_decisions = _parse_v16_review(
             ownership_raw,
             proposed_ids,
             {n["need_id"] for n in validated_needs},
@@ -2596,6 +2592,642 @@ def advisory_match_rich_v15(job_input):
         }
         for item in ranked
     ]
+
+    return {
+        "ranked": public_ranked
+    }
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v17
+# Goal: build a CHOICE POOL for the association (it will later choose 6).
+# We do NOT minimize the advisor count.
+# We keep every genuinely related advisor with a distinct material contribution.
+# Target pool: 8-10 when evidence supports it; minimum desired pool is 7.
+# ---------------------------------------------------------------------
+
+RICH_V17_POOL_MIN = int(
+    os.environ.get("RICH_V17_POOL_MIN", "7")
+)
+
+RICH_V17_POOL_TARGET = int(
+    os.environ.get("RICH_V17_POOL_TARGET", "9")
+)
+
+RICH_V17_POOL_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V17_POOL_MAX_NEW_TOKENS", "1500")
+)
+
+RICH_V17_EXPAND_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V17_EXPAND_MAX_NEW_TOKENS", "900")
+)
+
+RICH_V17_POOL_PROMPT = """أنت Athar OS Advisor Candidate Pool Engine v17.
+
+هذه ليست مرحلة اختيار الستة النهائيين.
+الجمعية ستختار لاحقًا 6 مستشارين من القائمة التي ترجعها أنت.
+مهمتك بناء Candidate Pool أوسع من 6، لكن كل مستشار فيه يجب أن يكون مرتبطًا فعلًا باحتياجات الجمعية.
+
+ستستلم:
+1) FACTS موثقة عن الجمعية وبرامجها.
+2) VALIDATED_NEEDS تم اكتشافها ومراجعتها قبل رؤية المستشارين.
+3) ملفات Expert DNA الغنية للـ16 مستشارًا.
+
+المعيار ليس "هل هذا المستشار ضروري وحده؟"
+المعيار هو:
+"هل لهذا المستشار مساهمة مستقلة، واضحة، ومسنودة بالأدلة في واحد أو أكثر من الاحتياجات المؤكدة، بما يجعله خيارًا حقيقيًا للجمعية عند اختيار الستة؟"
+
+صنّف كل مستشار في واحدة فقط:
+
+PRIMARY_FIT
+= يملك الاحتياج مباشرة أو يعالج جزءًا محوريًا منه.
+
+COMPLEMENTARY_FIT
+= لا يملك الاحتياج بالكامل، لكنه يضيف مساهمة مستقلة ومادية ومختلفة عن المالك الرئيسي.
+
+RELEVANT_OPTION
+= مرتبط فعليًا بالاحتياج الحالي وله قيمة استشارية واضحة، لكن مساهمته أقل مركزية من الفئتين السابقتين.
+
+ADJACENT
+= قريب من الموضوع أو قد يساعد عمومًا، لكن لا توجد مساهمة مستقلة واضحة مطلوبة من الاحتياج الحالي.
+
+UNRELATED
+= لا توجد صلة حقيقية.
+
+القائمة النهائية يجب أن تحتوي:
+PRIMARY_FIT + COMPLEMENTARY_FIT + RELEVANT_OPTION فقط.
+
+قواعد مهمة:
+- لا تطبق Minimum Expert Principle.
+- لا تحاول تقليل العدد إلى 2 أو 3.
+- الجمعية تحتاج قائمة اختيار أوسع من 6.
+- استهدف عادةً 8 إلى 10 مستشارين إذا كانت الوقائع تسمح.
+- لا تضف ADJACENT أو UNRELATED فقط للوصول إلى العدد.
+- يمكن أن يرتبط عدة مستشارين بنفس الاحتياج إذا كانت مساهمة كل منهم مختلفة فعلًا.
+- لا تخترع احتياجًا جديدًا خارج VALIDATED_NEEDS.
+- يمكنك استخدام FACTS لتفسير لماذا مساهمة المستشار مادية الآن، لكن لا تستخدمها لإنشاء مشكلة جديدة.
+
+أمثلة تمييز:
+- إدارة المحفظة والأولويات والاعتماديات:
+  13 غالبًا PRIMARY_FIT.
+  12 قد يكون COMPLEMENTARY_FIT إذا كانت الأولويات مرتبطة بالتنفيذ والجداول والموارد.
+  1 قد يكون COMPLEMENTARY_FIT إذا كان هناك قرار تنفيذي متعدد البرامج أو تخصيص موارد أو حسم ملكيات.
+  8 قد يكون RELEVANT_OPTION إذا كانت الأولويات تتطلب مفاضلة استراتيجية فعلية بين مسارات/برامج.
+  10 قد يكون RELEVANT_OPTION إذا كانت الأولويات تحتاج ربطًا واضحًا بالقضايا والأهداف الاستراتيجية.
+  3 يكون RELEVANT_OPTION فقط إذا كان تحديد الأولويات يتطلب قراءة داخلية/خارجية أو اتجاهات تدعم القرار.
+- التخطيط التشغيلي والمواسم والجداول والموارد:
+  12 غالبًا PRIMARY_FIT.
+  13 قد يكون COMPLEMENTARY_FIT عند وجود اعتماديات ومحفظة متعددة البرامج.
+  6 قد يكون RELEVANT_OPTION إذا كان اتساق التنفيذ والخدمة عبر البرامج المتعددة قضية مادية ظاهرة.
+  5 يحتاج فعلًا تحول/تبنٍ/انتقال، وليس مجرد تنفيذ.
+  7 يحتاج خطر/استمرارية/تعطل، وليس مجرد موسمية.
+- 14 لا يدخل إلا إذا كان هناك احتياج فعلي للقياس/KPI/المستهدفات/لوحات الأداء.
+- 15 لا يدخل إلا إذا كان هناك احتياج فعلي للتقييم/الأثر/النتائج/التعلم.
+- 16 لا يدخل إلا إذا كان هناك احتياج حوكمة/امتثال/صلاحيات/سياسات.
+- 11 لا يدخل إلا إذا كان هناك تصميم/إعادة تصميم مبادرة.
+- 4 لا يدخل إلا إذا كان هناك أصحاب مصلحة/شراكات ذات صلة بالاحتياج.
+- 2 لا يدخل إلا إذا كان هناك تشخيص/نضج/جاهزية.
+- 9 لا يدخل إلا إذا كان هناك هوية/رؤية/رسالة/قيم.
+
+تقييم SCORE:
+90-100 = PRIMARY_FIT قوي جدًا
+80-89 = PRIMARY_FIT / COMPLEMENTARY_FIT قوي
+70-79 = COMPLEMENTARY_FIT واضح
+55-69 = RELEVANT_OPTION مادي
+40-54 = RELEVANT_OPTION أضعف لكنه ما زال حقيقيًا
+أقل من 40 = ADJACENT أو UNRELATED ولا يظهر في القائمة
+
+السبب REASON مهم جدًا:
+- لا تكتب سببًا مختصرًا مثل "يملك إدارة المحفظة".
+- اكتب 25 إلى 45 كلمة عربية واضحة.
+- يجب أن يشرح:
+  1) ما الواقعة/الاحتياج الذي يربطه بالجمعية الآن.
+  2) ما المساهمة المحددة التي سيقدمها.
+  3) لماذا هذه المساهمة مختلفة أو مفيدة عند اختيار المستشارين الستة.
+- لا تكرر اسم التخصص فقط.
+- لا تستخدم أسبابًا عامة أو تسويقية.
+
+أخرج سطرًا لكل واحد من الـ16 مستشارًا:
+ADVISOR_ID|RELATION|SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
+
+RELATION = PRIMARY_FIT أو COMPLEMENTARY_FIT أو RELEVANT_OPTION أو ADJACENT أو UNRELATED
+ROLE = core أو supporting أو none
+MATCHED_NEED_IDS من VALIDATED_NEEDS فقط
+EVIDENCE_IDS من FACTS فقط، 1-4
+REASON كما هو موضح أعلاه
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+RICH_V17_EXPAND_PROMPT = """أنت Athar OS Candidate Pool Expansion Reviewer.
+
+الجولة الأولى أعادت أقل من 7 مستشارين، بينما الجمعية ستختار 6 وتحتاج Candidate Pool أوسع.
+راجع فقط المستشارين المستبعدين من الجولة الأولى.
+
+مهمتك ليست ملء العدد بأي ثمن.
+احتفظ بمستشار إضافي فقط إذا كان يمكن تصنيفه بصدق كـ RELEVANT_OPTION أو أعلى:
+أي لديه مساهمة مستقلة ومادية ومسنودة في أحد VALIDATED_NEEDS، وليس مجرد علاقة عامة أو مجاورة.
+
+ممنوع:
+- اختراع احتياج جديد.
+- تحويل إنجاز إلى مشكلة.
+- إدخال مستشار لأن تخصصه مفيد عمومًا.
+- إدخال ADJACENT فقط للوصول إلى 7.
+
+اكتب فقط المستشارين الإضافيين الحقيقيين:
+ADVISOR_ID|RELATION|SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
+
+RELATION يجب أن تكون PRIMARY_FIT أو COMPLEMENTARY_FIT أو RELEVANT_OPTION.
+REASON من 25 إلى 45 كلمة عربية، ويشرح الوقائع + المساهمة + سبب الصلة الفعلية.
+
+إذا لا يوجد مستشار إضافي حقيقي اكتب:
+NONE
+"""
+
+
+def _parse_v17_pool_lines(
+    text,
+    valid_advisor_ids,
+    valid_need_ids,
+    valid_fact_ids,
+    allow_only_kept=False,
+):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    if not cleaned or cleaned.upper() == "NONE":
+        return [], {}
+
+    kept = []
+    decisions = {}
+
+    keep_relations = {
+        "PRIMARY_FIT",
+        "COMPLEMENTARY_FIT",
+        "RELEVANT_OPTION",
+    }
+
+    valid_relations = keep_relations | {
+        "ADJACENT",
+        "UNRELATED",
+    }
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split("|", 6)
+        if len(parts) != 7:
+            continue
+
+        (
+            advisor_raw,
+            relation_raw,
+            score_raw,
+            role_raw,
+            needs_raw,
+            evidence_raw,
+            reason_raw,
+        ) = [p.strip() for p in parts]
+
+        a_m = re.search(r"\d+", advisor_raw)
+        s_m = re.search(r"\d+(?:\.\d+)?", score_raw)
+
+        if not a_m or not s_m:
+            continue
+
+        advisor_id = int(a_m.group())
+        if advisor_id not in valid_advisor_ids:
+            continue
+
+        relation = relation_raw.upper()
+        if relation not in valid_relations:
+            continue
+
+        if allow_only_kept and relation not in keep_relations:
+            continue
+
+        score = float(s_m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        role = role_raw.lower()
+        if role not in {"core", "supporting", "none"}:
+            role = "none"
+
+        matched_need_ids = []
+        if needs_raw != "-":
+            for token in re.split(r"[,،;\s]+", needs_raw):
+                token = token.strip().upper()
+                if token in valid_need_ids and token not in matched_need_ids:
+                    matched_need_ids.append(token)
+
+        evidence_ids = []
+        if evidence_raw != "-":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+
+        evidence_ids = evidence_ids[:4]
+
+        reason = re.sub(
+            r"\s+",
+            " ",
+            reason_raw,
+        ).strip()
+
+        should_keep = relation in keep_relations
+
+        # Schema grounding only; AI owns the semantic selection.
+        if should_keep:
+            if not matched_need_ids or not evidence_ids or not reason:
+                should_keep = False
+            else:
+                if score < 40:
+                    score = 40.0
+
+                if role == "none":
+                    role = (
+                        "core"
+                        if relation == "PRIMARY_FIT"
+                        else "supporting"
+                    )
+        else:
+            score = min(score, 39.0)
+            role = "none"
+
+        decisions[advisor_id] = {
+            "relation": relation,
+            "kept": should_keep,
+            "score": round(score / 100.0, 4),
+            "role": role,
+            "matched_need_ids": matched_need_ids,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+        if should_keep:
+            kept.append({
+                "advisor_id": advisor_id,
+                "relation": relation,
+                "score": round(score / 100.0, 4),
+                "role": role,
+                "matched_need_ids": matched_need_ids,
+                "evidence_ids": evidence_ids,
+                "reason": reason,
+            })
+
+    # Deduplicate by advisor, keeping highest score.
+    dedup = {}
+    for item in kept:
+        aid = item["advisor_id"]
+        if aid not in dedup or item["score"] > dedup[aid]["score"]:
+            dedup[aid] = item
+
+    kept = list(dedup.values())
+    kept.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return kept, decisions
+
+
+def _generate_v17_pool(
+    facts,
+    validated_needs,
+    advisors,
+):
+    import torch
+
+    messages = [
+        {
+            "role": "system",
+            "content": RICH_V17_POOL_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "facts": facts,
+                    "validated_needs": validated_needs,
+                    "advisors": advisors,
+                    "candidate_pool_requirement": {
+                        "association_final_selection_count": 6,
+                        "desired_candidate_pool_minimum": RICH_V17_POOL_MIN,
+                        "target_candidate_pool_size": RICH_V17_POOL_TARGET,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(
+        encoded["attention_mask"].sum().item()
+    )
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v17 pool input too long: {input_tokens}"
+        )
+
+    encoded = {
+        k: v.to(_RICH_DEVICE)
+        for k, v in encoded.items()
+    }
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V17_POOL_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.06,
+            no_repeat_ngram_size=8,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    return (
+        _RICH_TOKENIZER.decode(
+            generated[0],
+            skip_special_tokens=True,
+        ),
+        input_tokens,
+    )
+
+
+def _generate_v17_expansion(
+    facts,
+    validated_needs,
+    excluded_advisors,
+    current_pool,
+):
+    import torch
+
+    messages = [
+        {
+            "role": "system",
+            "content": RICH_V17_EXPAND_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "facts": facts,
+                    "validated_needs": validated_needs,
+                    "current_pool": current_pool,
+                    "excluded_advisors": excluded_advisors,
+                    "desired_candidate_pool_minimum": RICH_V17_POOL_MIN,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(
+        encoded["attention_mask"].sum().item()
+    )
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v17 expansion input too long: {input_tokens}"
+        )
+
+    encoded = {
+        k: v.to(_RICH_DEVICE)
+        for k, v in encoded.items()
+    }
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V17_EXPAND_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.06,
+            no_repeat_ngram_size=8,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    return (
+        _RICH_TOKENIZER.decode(
+            generated[0],
+            skip_special_tokens=True,
+        ),
+        input_tokens,
+    )
+
+
+def advisory_match_rich_v17(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        f["fact_id"]
+        for f in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+    advisor_by_number = {
+        int(a["advisor_id"]): a
+        for a in advisors
+    }
+
+    # 1) Need discovery
+    print(
+        "Rich v17 pass 1/4: discovering grounded needs...",
+        flush=True,
+    )
+
+    needs_raw, needs_tokens = generate_rich_v12_needs(
+        facts
+    )
+
+    candidate_needs = _parse_v12_needs(
+        needs_raw,
+        valid_fact_ids,
+    )
+
+    # 2) Need validation
+    print(
+        f"Rich v17 pass 2/4: validating {len(candidate_needs)} needs...",
+        flush=True,
+    )
+
+    if candidate_needs:
+        need_review_raw, need_review_tokens = generate_rich_v13_need_review(
+            facts,
+            candidate_needs,
+        )
+
+        validated_needs, need_review_decisions = _parse_v13_need_review(
+            need_review_raw,
+            candidate_needs,
+            valid_fact_ids,
+        )
+    else:
+        need_review_raw = "NONE"
+        need_review_tokens = 0
+        validated_needs = []
+        need_review_decisions = {}
+
+    # 3) Build candidate pool directly from all 16.
+    if validated_needs:
+        print(
+            "Rich v17 pass 3/4: building broad but relevant advisor candidate pool...",
+            flush=True,
+        )
+
+        pool_raw, pool_tokens = _generate_v17_pool(
+            facts,
+            validated_needs,
+            advisors,
+        )
+
+        pool_internal, pool_decisions = _parse_v17_pool_lines(
+            pool_raw,
+            set(range(1, 17)),
+            {n["need_id"] for n in validated_needs},
+            valid_fact_ids,
+        )
+    else:
+        pool_raw = "NONE"
+        pool_tokens = 0
+        pool_internal = []
+        pool_decisions = {}
+
+    # 4) If the genuine pool is still too narrow, one bounded AI expansion pass.
+    expansion_raw = "NONE"
+    expansion_tokens = 0
+
+    if (
+        validated_needs
+        and len(pool_internal) < RICH_V17_POOL_MIN
+    ):
+        kept_ids = {
+            item["advisor_id"]
+            for item in pool_internal
+        }
+
+        excluded_advisors = [
+            advisor
+            for advisor in advisors
+            if int(advisor["advisor_id"]) not in kept_ids
+        ]
+
+        print(
+            f"Rich v17 pass 4/4: pool has {len(pool_internal)} advisors; "
+            f"reviewing excluded profiles for additional genuine relevance...",
+            flush=True,
+        )
+
+        expansion_raw, expansion_tokens = _generate_v17_expansion(
+            facts,
+            validated_needs,
+            excluded_advisors,
+            pool_internal,
+        )
+
+        additions, _ = _parse_v17_pool_lines(
+            expansion_raw,
+            {
+                int(a["advisor_id"])
+                for a in excluded_advisors
+            },
+            {n["need_id"] for n in validated_needs},
+            valid_fact_ids,
+            allow_only_kept=True,
+        )
+
+        combined = {
+            item["advisor_id"]: item
+            for item in pool_internal
+        }
+
+        for item in additions:
+            if item["advisor_id"] not in combined:
+                combined[item["advisor_id"]] = item
+
+        pool_internal = list(
+            combined.values()
+        )
+
+        pool_internal.sort(
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+
+    # Final public payload: exactly advisor_id + score + detailed reason.
+    public_ranked = []
+
+    for item in pool_internal:
+        advisor = advisor_by_number[
+            int(item["advisor_id"])
+        ]
+
+        public_ranked.append({
+            "advisor_id": advisor.get(
+                "system_code",
+                str(item["advisor_id"]),
+            ),
+            "score": item["score"],
+            "reason": item["reason"],
+        })
 
     return {
         "ranked": public_ranked
@@ -4541,7 +5173,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v15(
+        return advisory_match_rich_v17(
             job_input
         )
 

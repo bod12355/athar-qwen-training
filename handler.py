@@ -922,7 +922,7 @@ def advisory_match_rich_v9(job_input):
     response = {
         "status": "completed",
         "type": "advisory_match",
-        "routing_engine": "rich_ai_v11_adjudicated",
+        "routing_engine": "rich_ai_v12_need_first",
         "model": MATCHER_BASE_MODEL,
         "run_id": job_input.get("run_id"),
         "organization_name": organization.get("name"),
@@ -1353,6 +1353,451 @@ def advisory_match_rich_v11(job_input):
         response["proposal_raw_output"] = proposal_raw
         response["review_raw_output"] = review_raw
         response["review_decisions"] = review_decisions
+
+    return response
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v12
+# Pass 1: AI discovers material needs/opportunities WITHOUT seeing advisors.
+# Pass 2: AI globally maps all 16 rich advisor profiles ONLY to those needs.
+# This prevents reverse-rationalization and still lets AI select all matches.
+# ---------------------------------------------------------------------
+
+RICH_V12_NEEDS_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V12_NEEDS_MAX_NEW_TOKENS", "700")
+)
+
+RICH_V12_MATCH_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V12_MATCH_MAX_NEW_TOKENS", "1100")
+)
+
+RICH_V12_NEEDS_PROMPT = """أنت Athar OS Advisory Need Discovery Engine.
+
+ستستلم FACTS فقط عن المنظمة وبرامجها. لا يوجد أمامك أي مستشارين في هذه المرحلة.
+استخرج كل الاحتياجات أو فرص التحسين الاستشارية الحالية والمادية التي تدعمها الوقائع فعلًا.
+
+المقصود بالاحتياج المادي:
+- مشكلة أو فجوة أو مخاطرة صريحة.
+- قرار أو مفاضلة مهمة تحتاج معالجة.
+- تعقيد حقيقي ناتج عن حجم/تنوع/تداخل البرامج أو المواسم أو الموارد.
+- فرصة تحسين واضحة ومباشرة يمكن استنتاجها من الوقائع دون اختراع مشكلة.
+
+قواعد صارمة:
+- لا تستخرج احتياجًا لأن مجالًا ما مهم عمومًا.
+- الإنجاز السابق ليس فجوة حالية.
+- تطبيق ERP، إعادة الهيكلة، وجود سياسات، أو ارتفاع الحوكمة تُعامل كإنجازات ما لم يظهر تحدٍ حالي مرتبط بها.
+- لا تفترض KPI أو Dashboard أو Baseline أو Targets إن لم توجد إشارة فعلية للقياس والأداء.
+- لا تفترض MEAL أو Impact Measurement لمجرد وجود برامج.
+- لا تفترض Change Management لمجرد وجود نظام جديد أو برامج تدريبية.
+- لا تفترض Governance Gap لمجرد أن الجهة جمعية أهلية أو لديها درجة حوكمة.
+- لا تفترض Strategy Review لمجرد تنوع البرامج أو كبر المنظمة.
+- لا تفترض Partnerships لمجرد وجود إيرادات أو برامج.
+- لا تفترض Quality Problem لمجرد تقديم خدمات.
+- لا تفترض Business Continuity Risk لمجرد وجود خدمات موسمية.
+- تعدد وتنوع البرامج يمكن أن يولد احتياجًا ماديًا لإدارة المحفظة والأولويات إذا كان واضحًا.
+- اختلاف المواسم والجداول وطرق التقديم يمكن أن يولد احتياجًا ماديًا للتنسيق والتخطيط التشغيلي.
+- يمكن وجود أكثر من احتياج، لكن لا تكرر نفس الفكرة بصيغ مختلفة.
+- لا يوجد عدد ثابت. استخرج كل ما تدعمه الوقائع، ولا تملأ القائمة.
+
+PRIORITY:
+high = يؤثر مباشرة في القرار/التنفيذ/النتائج
+medium = مهم لكنه مساند
+low = قيمة محدودة؛ استخدمه فقط إذا كان ماديًا فعلًا
+
+أخرج سطرًا واحدًا لكل احتياج:
+NEED_ID|PRIORITY|EVIDENCE_IDS|NEED
+
+مثال:
+N1|high|F6,P1,P10|تعدد البرامج وتنوعها يخلق حاجة لإدارة المحفظة وترتيب الأولويات والاعتماديات.
+
+EVIDENCE_IDS من 1 إلى 4 فقط ويجب أن تكون موجودة في FACTS.
+NEED جملة عربية محددة تصف الاحتياج الحالي لا اسم تخصص.
+إذا لم توجد احتياجات مادية اكتب:
+NONE
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+RICH_V12_MATCH_PROMPT = """أنت Athar OS Global Advisor Matching Engine.
+
+ستستلم:
+1) FACTS موثقة.
+2) NEEDS تم استخراجها مستقلًا قبل رؤية المستشارين.
+3) ملفات Expert DNA الغنية للـ16 مستشارًا.
+
+مهمتك مقارنة الـ16 جميعًا معًا وإرجاع كل مستشار مناسب ماديًا لاحتياج واحد أو أكثر من NEEDS.
+
+قواعد حاسمة:
+- ممنوع اختراع احتياج جديد في هذه المرحلة.
+- لا يمكن اختيار مستشار إلا إذا كان مرتبطًا مباشرة بـ matched_need_ids موجودة في NEEDS.
+- activation_when وowned_outcome وscope تحدد الملاءمة.
+- not_primary_when وboundaries تمنع تضخيم الدور.
+- لا تختَر مستشارًا بسبب علاقة عامة أو لأن تخصصه "مفيد عادة".
+- إذا عالج مستشاران نفس الاحتياج، احتفظ بكليهما فقط إذا كان لكل منهما دور مستقل ومادي مختلف.
+- لا يوجد عدد ثابت. أخرج كل المناسبين فقط.
+- المستشار الأساسي core يملك نتيجة رئيسية للاحتياج.
+- supporting يضيف قيمة مستقلة مادية للاحتياج لكنه لا يملكه أساسًا.
+- لا تستخدم FACTS لتكوين احتياج جديد؛ استخدمها فقط للتحقق من NEEDS وأسباب المطابقة.
+
+فرّق بدقة بين:
+14 KPI/Dashboard و15 MEAL/Impact
+11 Initiative Design و12 Operational Planning و13 Portfolio/Program/Project
+1 Executive Leadership و16 Governance/Compliance
+2 Institutional Diagnosis و8 Strategic Planning
+5 Change/Adoption و6 Quality/Continuous Improvement
+
+SCORE كعدد صحيح:
+90-100 = تطابق مباشر ومحوري
+80-89 = قوي
+70-79 = واضح
+55-69 = مساند مادي
+40-54 = محدود لكنه حقيقي
+أقل من 40 = لا تخرجه
+
+أخرج سطرًا واحدًا لكل مستشار مناسب:
+ADVISOR_ID|SCORE|ROLE|MATCHED_NEED_IDS|EVIDENCE_IDS|REASON
+
+مثال:
+13|94|core|N1|F6,P1,P10|يمتلك تنظيم المحفظة والأولويات والاعتماديات التي يطلبها N1.
+
+MATCHED_NEED_IDS يجب أن تكون من NEEDS فقط.
+EVIDENCE_IDS من 1 إلى 3 فقط من FACTS.
+REASON جملة عربية قصيرة ومحددة.
+إذا لم يوجد مستشار مناسب اكتب:
+NONE
+
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+def _parse_v12_needs(text, valid_fact_ids):
+    cleaned = str(text).replace("```text", "").replace("```", "").strip()
+
+    if not cleaned or cleaned.upper() == "NONE":
+        return []
+
+    needs = []
+    seen = set()
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or line.upper() == "NONE":
+            continue
+
+        parts = line.split("|", 3)
+        if len(parts) != 4:
+            continue
+
+        need_id_raw, priority_raw, evidence_raw, need_text_raw = [p.strip() for p in parts]
+
+        m = re.search(r"N\s*(\d+)", need_id_raw, flags=re.IGNORECASE)
+        if not m:
+            continue
+
+        need_id = f"N{int(m.group(1))}"
+        if need_id in seen:
+            continue
+
+        priority = priority_raw.lower()
+        if priority not in {"high", "medium", "low"}:
+            priority = "medium"
+
+        evidence_ids = []
+        for token in re.split(r"[,،;\s]+", evidence_raw):
+            token = token.strip().upper()
+            if token in valid_fact_ids and token not in evidence_ids:
+                evidence_ids.append(token)
+        evidence_ids = evidence_ids[:4]
+
+        need_text = re.sub(r"\s+", " ", need_text_raw).strip()
+
+        if not evidence_ids or not need_text:
+            continue
+
+        if len(need_text.split()) > 30:
+            need_text = " ".join(need_text.split()[:30]).rstrip("،,.") + "."
+
+        needs.append({
+            "need_id": need_id,
+            "priority": priority,
+            "evidence_ids": evidence_ids,
+            "need": need_text,
+        })
+        seen.add(need_id)
+
+    return needs
+
+
+def generate_rich_v12_needs(facts):
+    import torch
+
+    messages = [
+        {"role": "system", "content": RICH_V12_NEEDS_PROMPT},
+        {"role": "user", "content": json.dumps({"facts": facts}, ensure_ascii=False)},
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(encoded["attention_mask"].sum().item())
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v12 needs input too long: {input_tokens} > {RICH_MAX_INPUT_TOKENS}"
+        )
+
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+
+    print(f"Rich v12 needs input tokens: {input_tokens}", flush=True)
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V12_NEEDS_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    raw_text = _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True)
+
+    return raw_text, input_tokens
+
+
+def _parse_v12_matches(text, valid_advisor_ids, valid_need_ids, valid_fact_ids):
+    cleaned = str(text).replace("```text", "").replace("```", "").strip()
+
+    if not cleaned or cleaned.upper() == "NONE":
+        return []
+
+    matches = []
+    seen = set()
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or line.upper() == "NONE":
+            continue
+
+        parts = line.split("|", 5)
+        if len(parts) != 6:
+            continue
+
+        advisor_raw, score_raw, role_raw, needs_raw, evidence_raw, reason_raw = [p.strip() for p in parts]
+
+        a_m = re.search(r"\d+", advisor_raw)
+        s_m = re.search(r"\d+(?:\.\d+)?", score_raw)
+
+        if not a_m or not s_m:
+            continue
+
+        advisor_id = int(a_m.group())
+        if advisor_id not in valid_advisor_ids or advisor_id in seen:
+            continue
+
+        score = float(s_m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        if score < 40:
+            continue
+
+        role = role_raw.lower()
+        if role not in {"core", "supporting"}:
+            role = "supporting"
+
+        matched_need_ids = []
+        for token in re.split(r"[,،;\s]+", needs_raw):
+            token = token.strip().upper()
+            if token in valid_need_ids and token not in matched_need_ids:
+                matched_need_ids.append(token)
+
+        if not matched_need_ids:
+            continue
+
+        evidence_ids = []
+        for token in re.split(r"[,،;\s]+", evidence_raw):
+            token = token.strip().upper()
+            if token in valid_fact_ids and token not in evidence_ids:
+                evidence_ids.append(token)
+        evidence_ids = evidence_ids[:3]
+
+        if not evidence_ids:
+            continue
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+        if not reason:
+            continue
+
+        if len(reason.split()) > 20:
+            reason = " ".join(reason.split()[:20]).rstrip("،,.") + "."
+
+        matches.append({
+            "advisor_id": advisor_id,
+            "score": round(score / 100.0, 4),
+            "role": role,
+            "matched_need_ids": matched_need_ids,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        })
+        seen.add(advisor_id)
+
+    matches.sort(key=lambda x: x["score"], reverse=True)
+    return matches
+
+
+def generate_rich_v12_matches(facts, needs, advisors):
+    import torch
+
+    messages = [
+        {"role": "system", "content": RICH_V12_MATCH_PROMPT},
+        {"role": "user", "content": json.dumps({
+            "facts": facts,
+            "needs": needs,
+            "advisors": advisors,
+        }, ensure_ascii=False)},
+    ]
+
+    prompt = _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _RICH_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(encoded["attention_mask"].sum().item())
+
+    if input_tokens > RICH_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Rich v12 match input too long: {input_tokens} > {RICH_MAX_INPUT_TOKENS}"
+        )
+
+    encoded = {k: v.to(_RICH_DEVICE) for k, v in encoded.items()}
+
+    print(f"Rich v12 match input tokens: {input_tokens}", flush=True)
+
+    with torch.inference_mode():
+        output_ids = _RICH_MODEL.generate(
+            **encoded,
+            max_new_tokens=RICH_V12_MATCH_MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=10,
+            eos_token_id=_RICH_TOKENIZER.eos_token_id,
+            pad_token_id=_RICH_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated = output_ids[:, encoded["input_ids"].shape[1]:]
+    raw_text = _RICH_TOKENIZER.decode(generated[0], skip_special_tokens=True)
+
+    return raw_text, input_tokens
+
+
+def advisory_match_rich_v12(job_input):
+    organization, programs = normalize_advisory_input(job_input.get("input", {}))
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(organization, programs)
+    valid_fact_ids = {f["fact_id"] for f in facts}
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v12 pass 1/2: discovering advisory needs independently from advisor profiles...",
+        flush=True,
+    )
+
+    needs_raw, needs_tokens = generate_rich_v12_needs(facts)
+    needs = _parse_v12_needs(needs_raw, valid_fact_ids)
+
+    print(
+        f"Rich v12 discovered {len(needs)} grounded needs/opportunities.",
+        flush=True,
+    )
+
+    if needs:
+        print(
+            "Rich v12 pass 2/2: globally matching all 16 rich advisor profiles to discovered needs...",
+            flush=True,
+        )
+
+        match_raw, match_tokens = generate_rich_v12_matches(
+            facts,
+            needs,
+            advisors,
+        )
+
+        internal_matches = _parse_v12_matches(
+            match_raw,
+            set(range(1, 17)),
+            {n["need_id"] for n in needs},
+            valid_fact_ids,
+        )
+    else:
+        match_raw = "NONE"
+        match_tokens = 0
+        internal_matches = []
+
+    advisor_by_number = {
+        int(advisor["advisor_id"]): advisor
+        for advisor in advisors
+    }
+
+    ranked = []
+    for item in internal_matches:
+        number = int(item["advisor_id"])
+        advisor = advisor_by_number[number]
+
+        ranked.append({
+            "advisor_id": advisor.get("system_code", str(number)),
+            "advisor_name": advisor.get("name_ar", advisor.get("name_en")),
+            "score": item["score"],
+            "role": item["role"],
+            "matched_need_ids": item["matched_need_ids"],
+            "evidence_ids": item["evidence_ids"],
+            "reason": item["reason"],
+        })
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "rich_ai_v12_need_first",
+        "model": MATCHER_BASE_MODEL,
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "evaluated_advisors": 16,
+        "needs_count": len(needs),
+        "needs": needs,
+        "matched_advisors": len(ranked),
+        "needs_input_tokens": needs_tokens,
+        "matching_input_tokens": match_tokens,
+        "ranked": ranked,
+    }
+
+    if job_input.get("debug", False):
+        response["needs_raw_output"] = needs_raw
+        response["matching_raw_output"] = match_raw
 
     return response
 
@@ -3296,7 +3741,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v11(
+        return advisory_match_rich_v12(
             job_input
         )
 

@@ -77,6 +77,125 @@ _MATCHER_REGISTRY = None
 _MATCHER_DEVICE = None
 
 
+# ---------------------------------------------------------------------
+# Grounded routing engine v5
+# Production advisory_match no longer depends on the binary Matcher LoRA.
+# It uses the base Qwen3-14B as a two-stage grounded router:
+#   1) extract advisory needs/opportunities with evidence IDs
+#   2) compare ALL advisors together against those grounded needs
+# ---------------------------------------------------------------------
+
+ROUTER_MAX_INPUT_TOKENS = int(
+    os.environ.get("ROUTER_MAX_INPUT_TOKENS", "20000")
+)
+ROUTER_NEEDS_MAX_NEW_TOKENS = int(
+    os.environ.get("ROUTER_NEEDS_MAX_NEW_TOKENS", "900")
+)
+ROUTER_RANK_MAX_NEW_TOKENS = int(
+    os.environ.get("ROUTER_RANK_MAX_NEW_TOKENS", "1400")
+)
+ROUTER_MIN_SCORE = float(
+    os.environ.get("ROUTER_MIN_SCORE", "0.35")
+)
+
+_ROUTER_MODEL = None
+_ROUTER_TOKENIZER = None
+_ROUTER_REGISTRY = None
+_ROUTER_DEVICE = None
+
+NEEDS_SYSTEM_PROMPT = """أنت محلل احتياجات استشارية لمنظومة Athar OS.
+
+ستستلم قائمة FACTS مرقمة مأخوذة من بيانات منظمة وبرامجها.
+استخرج فقط الاحتياجات أو المخاطر أو الفرص الاستشارية التي يمكن دعمها مباشرة بهذه الوقائع.
+
+قواعد ملزمة:
+- لا تشترط وجود كلمة "تحتاج" أو "مشكلة".
+- لا تخترع فجوة غير مدعومة.
+- الإنجاز السابق وحده لا يعني وجود مشكلة حالية.
+- يمكن اعتبار تعقيد حقيقي في المحفظة أو البرامج فرصة استشارية إذا كانت له قيمة مادية واضحة.
+- كل حاجة يجب أن تشير إلى evidence_ids صحيحة من FACTS.
+- اجمع الوقائع المتشابهة في حاجة واحدة بدل التكرار.
+- أخرج من 0 إلى 8 احتياجات فقط.
+- لا ترشح مستشارين في هذه المرحلة.
+
+kind يجب أن يكون واحدًا من:
+explicit_gap
+direct_inference
+advisory_opportunity
+
+priority يجب أن يكون:
+high
+medium
+low
+
+أعد JSON فقط بهذا الشكل:
+{
+  "needs": [
+    {
+      "need_id": "N1",
+      "need": "وصف عربي موجز للحاجة",
+      "kind": "direct_inference",
+      "priority": "high",
+      "evidence_ids": ["F2", "P3"]
+    }
+  ]
+}
+"""
+
+ROUTING_SYSTEM_PROMPT = """أنت محرك توجيه المستشارين في Athar OS.
+
+ستستلم:
+1) GROUNDED_NEEDS: احتياجات مستخرجة مسبقًا، وكل حاجة مرتبطة بأدلة.
+2) ADVISORS: ملفات التوجيه للمستشارين.
+
+قيّم جميع المستشارين معًا، وليس كل مستشار بمعزل عن الآخرين.
+
+المطلوب:
+- رشح كل مستشار له قيمة مادية حقيقية لإحدى الاحتياجات الحالية.
+- لا يوجد عدد ثابت للترشيحات.
+- لا تضف مستشارًا لمجرد أن مجاله مهم عمومًا.
+- لا تخترع احتياجًا جديدًا غير موجود في GROUNDED_NEEDS.
+- كل مستشار مرشح يجب أن يحتوي matched_need_ids غير فارغة.
+- activation_conditions دليل إيجابي قوي.
+- scope_boundaries حد ملزم.
+- not_primary_when لا يعني الاستبعاد التلقائي؛ قد يكون الدور supporting إذا أضاف قيمة مادية.
+- قارن المجالات المتجاورة حتى لا تكرر نفس الحاجة بلا داعٍ.
+
+تمييزات مهمة:
+- Advisor 14: KPI وتعريف المؤشرات والمصادر وخطوط الأساس والمستهدفات ولوحات القيادة.
+- Advisor 15: MEAL والنتائج والتقييم والتعلم ونظرية التغيير وقوة دليل الأثر والسببية.
+- Advisor 11: تصميم التدخل أو المبادرة قبل اعتمادها واختبار الفرضيات والقيمة.
+- Advisor 12: تحويل أعمال معتمدة إلى خطة تشغيلية وملاك وجدول وموارد واعتماديات.
+- Advisor 13: المحافظ والبرامج والمشاريع وPMO والبوابات والمنافع وتعارض الموارد.
+- Advisor 16: الحوكمة والامتثال والصلاحيات والسياسات والضوابط وأدلة التطبيق.
+- Advisor 1: القيادة التنفيذية وحسم القرار وترتيب الأولويات والتنفيذ.
+- Advisor 5: التحول والتبني والمقاومة وموجات التغيير؛ مجرد وجود ERP لا يكفي.
+- Advisor 6: الجودة وعدم المطابقة والمعايير والإجراءات التصحيحية والتحسين المستمر.
+
+الدرجات:
+0.85-1.00 = مباشر ومحوري
+0.70-0.84 = قوي وواضح
+0.50-0.69 = مساند مادي
+0.35-0.49 = محدود لكن مبرر
+أقل من 0.35 لا ترشحه عادة.
+
+role يجب أن يكون primary أو supporting.
+
+أعد JSON فقط:
+{
+  "ranked": [
+    {
+      "advisor_id": 14,
+      "score": 0.91,
+      "role": "primary",
+      "matched_need_ids": ["N2"],
+      "reason": "سبب عربي قصير ومحدد"
+    }
+  ]
+}
+"""
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -816,6 +935,692 @@ def advisory_match_inference(
     return response
 
 
+
+def ensure_grounded_router_model(token):
+
+    global _ROUTER_MODEL
+    global _ROUTER_TOKENIZER
+    global _ROUTER_REGISTRY
+    global _ROUTER_DEVICE
+
+    if (
+        _ROUTER_MODEL is not None
+        and _ROUTER_TOKENIZER is not None
+        and _ROUTER_REGISTRY is not None
+    ):
+        return
+
+    print(
+        "Loading grounded routing model...",
+        flush=True,
+    )
+
+    started = time.time()
+
+    import torch
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        BitsAndBytesConfig,
+    )
+
+    # We need only text assets from GitHub for production routing.
+    # No Matcher LoRA is loaded here.
+    repo_dir, _ = clone_repo_without_lfs(
+        token,
+        repo_dir="/tmp/athar_grounded_router_repo",
+    )
+
+    registry, _ = load_matcher_assets(
+        repo_dir
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        MATCHER_BASE_MODEL,
+        use_fast=True,
+    )
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    tokenizer.padding_side = "left"
+
+    compute_dtype = (
+        torch.bfloat16
+        if torch.cuda.is_available()
+        else torch.float32
+    )
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=compute_dtype,
+    )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MATCHER_BASE_MODEL,
+        quantization_config=quantization_config,
+        torch_dtype=compute_dtype,
+        device_map={"": 0},
+        attn_implementation="flash_attention_2",
+    )
+
+    model.eval()
+
+    _ROUTER_MODEL = model
+    _ROUTER_TOKENIZER = tokenizer
+    _ROUTER_REGISTRY = registry
+    _ROUTER_DEVICE = next(model.parameters()).device
+
+    print(
+        f"Grounded router ready in {round(time.time() - started, 2)}s",
+        flush=True,
+    )
+
+
+def build_grounded_facts(
+    organization,
+    programs,
+):
+
+    facts = []
+
+    org_fields = [
+        ("F1", "short_description"),
+        ("F2", "detailed_description"),
+        ("F3", "competitive_advantage"),
+        ("F4", "important_notes"),
+    ]
+
+    for fact_id, field in org_fields:
+        value = organization.get(field)
+
+        if value is None:
+            continue
+
+        if isinstance(value, (list, dict)):
+            value = json.dumps(
+                value,
+                ensure_ascii=False,
+            )
+        else:
+            value = str(value).strip()
+
+        if value:
+            facts.append({
+                "fact_id": fact_id,
+                "source": f"organization.{field}",
+                "text": value,
+            })
+
+    activity_fields = organization.get(
+        "activity_fields",
+        []
+    )
+
+    if activity_fields:
+        facts.append({
+            "fact_id": "F5",
+            "source": "organization.activity_fields",
+            "text": json.dumps(
+                activity_fields,
+                ensure_ascii=False,
+            ),
+        })
+
+    for index, program in enumerate(
+        programs,
+        start=1,
+    ):
+
+        if not isinstance(program, dict):
+            continue
+
+        parts = []
+
+        for field in [
+            "name",
+            "type",
+            "description",
+            "target_audience",
+            "beneficiary_value",
+            "delivery_method",
+        ]:
+            value = program.get(field)
+
+            if value is None:
+                continue
+
+            value = str(value).strip()
+
+            if value:
+                parts.append(
+                    f"{field}={value}"
+                )
+
+        if parts:
+            facts.append({
+                "fact_id": f"P{index}",
+                "source": f"programs[{index - 1}]",
+                "text": " | ".join(parts),
+            })
+
+    return facts
+
+
+def generate_json_with_router(
+    system_prompt,
+    payload,
+    max_new_tokens,
+):
+
+    import torch
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    prompt = _ROUTER_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    encoded = _ROUTER_TOKENIZER(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_tokens = int(
+        encoded["attention_mask"].sum().item()
+    )
+
+    if input_tokens > ROUTER_MAX_INPUT_TOKENS:
+        raise ValueError(
+            f"Grounded router input is too long: "
+            f"{input_tokens} tokens > {ROUTER_MAX_INPUT_TOKENS}"
+        )
+
+    encoded = {
+        key: value.to(_ROUTER_DEVICE)
+        for key, value in encoded.items()
+    }
+
+    with torch.inference_mode():
+        output_ids = _ROUTER_MODEL.generate(
+            **encoded,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            repetition_penalty=1.06,
+            no_repeat_ngram_size=10,
+            eos_token_id=_ROUTER_TOKENIZER.eos_token_id,
+            pad_token_id=_ROUTER_TOKENIZER.pad_token_id,
+            use_cache=True,
+        )
+
+    generated_ids = output_ids[
+        :,
+        encoded["input_ids"].shape[1]:,
+    ]
+
+    text = _ROUTER_TOKENIZER.decode(
+        generated_ids[0],
+        skip_special_tokens=True,
+    )
+
+    parsed = extract_json_object(
+        text
+    )
+
+    return parsed, input_tokens, text
+
+
+def normalize_grounded_needs(
+    raw_needs,
+    facts,
+):
+
+    fact_map = {
+        fact["fact_id"]: fact
+        for fact in facts
+    }
+
+    allowed_kinds = {
+        "explicit_gap",
+        "direct_inference",
+        "advisory_opportunity",
+    }
+
+    allowed_priorities = {
+        "high",
+        "medium",
+        "low",
+    }
+
+    normalized = []
+
+    if not isinstance(raw_needs, list):
+        return normalized
+
+    for index, raw_need in enumerate(
+        raw_needs[:8],
+        start=1,
+    ):
+
+        if not isinstance(raw_need, dict):
+            continue
+
+        need_text = str(
+            raw_need.get("need", "")
+        ).strip()
+
+        if not need_text:
+            continue
+
+        evidence_ids = raw_need.get(
+            "evidence_ids",
+            []
+        )
+
+        if not isinstance(
+            evidence_ids,
+            list,
+        ):
+            evidence_ids = []
+
+        evidence_ids = [
+            str(evidence_id)
+            for evidence_id in evidence_ids
+            if str(evidence_id) in fact_map
+        ]
+
+        # A need without a valid evidence pointer is rejected.
+        if not evidence_ids:
+            continue
+
+        need_id = f"N{len(normalized) + 1}"
+
+        kind = raw_need.get(
+            "kind",
+            "direct_inference",
+        )
+
+        if kind not in allowed_kinds:
+            kind = "direct_inference"
+
+        priority = raw_need.get(
+            "priority",
+            "medium",
+        )
+
+        if priority not in allowed_priorities:
+            priority = "medium"
+
+        normalized.append({
+            "need_id": need_id,
+            "need": need_text,
+            "kind": kind,
+            "priority": priority,
+            "evidence_ids": evidence_ids,
+            "evidence": [
+                {
+                    "fact_id": evidence_id,
+                    "source": fact_map[evidence_id]["source"],
+                    "text": fact_map[evidence_id]["text"],
+                }
+                for evidence_id in evidence_ids
+            ],
+        })
+
+    return normalized
+
+
+def extract_grounded_advisory_needs(
+    organization,
+    programs,
+):
+
+    facts = build_grounded_facts(
+        organization,
+        programs,
+    )
+
+    raw, input_tokens, raw_text = generate_json_with_router(
+        NEEDS_SYSTEM_PROMPT,
+        {
+            "organization_name": organization.get("name"),
+            "facts": facts,
+        },
+        ROUTER_NEEDS_MAX_NEW_TOKENS,
+    )
+
+    needs = normalize_grounded_needs(
+        raw.get("needs", []),
+        facts,
+    )
+
+    return {
+        "needs": needs,
+        "facts": facts,
+        "input_tokens": input_tokens,
+        "raw_text": raw_text,
+    }
+
+
+def compact_routing_advisor(advisor):
+
+    return {
+        "advisor_id": advisor.get("advisor_id"),
+        "name_ar": advisor.get("name_ar"),
+        "mission_summary": advisor.get(
+            "mission_summary",
+            "",
+        ),
+        "owned_outcome": advisor.get(
+            "owned_outcome",
+            "",
+        ),
+        "core_scope": advisor.get(
+            "core_scope",
+            [],
+        ),
+        "activation_conditions": advisor.get(
+            "activation_conditions",
+            [],
+        ),
+        "not_primary_when": advisor.get(
+            "not_primary_when",
+            [],
+        ),
+        "scope_boundaries": advisor.get(
+            "scope_boundaries",
+            "",
+        ),
+        "match_signals": advisor.get(
+            "match_signals",
+            [],
+        ),
+    }
+
+
+def route_all_advisors(
+    needs,
+):
+
+    advisors = [
+        compact_routing_advisor(
+            advisor
+        )
+        for advisor in _ROUTER_REGISTRY["advisors"]
+    ]
+
+    routing_needs = [
+        {
+            "need_id": need["need_id"],
+            "need": need["need"],
+            "kind": need["kind"],
+            "priority": need["priority"],
+            "evidence": [
+                evidence["text"]
+                for evidence in need["evidence"]
+            ],
+        }
+        for need in needs
+    ]
+
+    raw, input_tokens, raw_text = generate_json_with_router(
+        ROUTING_SYSTEM_PROMPT,
+        {
+            "grounded_needs": routing_needs,
+            "advisors": advisors,
+        },
+        ROUTER_RANK_MAX_NEW_TOKENS,
+    )
+
+    return {
+        "raw_ranked": raw.get(
+            "ranked",
+            []
+        ),
+        "input_tokens": input_tokens,
+        "raw_text": raw_text,
+    }
+
+
+def validate_global_ranking(
+    raw_ranked,
+    needs,
+):
+
+    valid_advisor_ids = {
+        advisor["advisor_id"]
+        for advisor in _ROUTER_REGISTRY["advisors"]
+    }
+
+    valid_need_ids = {
+        need["need_id"]
+        for need in needs
+    }
+
+    seen_advisors = set()
+    ranked = []
+
+    if not isinstance(
+        raw_ranked,
+        list,
+    ):
+        return ranked
+
+    for row in raw_ranked:
+
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            advisor_id = int(
+                row.get("advisor_id")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if (
+            advisor_id not in valid_advisor_ids
+            or advisor_id in seen_advisors
+        ):
+            continue
+
+        matched_need_ids = row.get(
+            "matched_need_ids",
+            []
+        )
+
+        if not isinstance(
+            matched_need_ids,
+            list,
+        ):
+            matched_need_ids = []
+
+        matched_need_ids = [
+            str(need_id)
+            for need_id in matched_need_ids
+            if str(need_id) in valid_need_ids
+        ]
+
+        # This is the key guardrail:
+        # no advisor can be returned without a grounded need.
+        if not matched_need_ids:
+            continue
+
+        try:
+            score = float(
+                row.get("score", 0.0)
+            )
+        except (TypeError, ValueError):
+            continue
+
+        score = max(
+            0.0,
+            min(1.0, score),
+        )
+
+        if score < ROUTER_MIN_SCORE:
+            continue
+
+        role = str(
+            row.get("role", "supporting")
+        ).strip().lower()
+
+        if role not in {
+            "primary",
+            "supporting",
+        }:
+            role = "supporting"
+
+        reason = str(
+            row.get("reason", "")
+        ).strip()
+
+        if not reason:
+            reason = (
+                "ملاءمة مرتبطة بحاجة موثقة في بيانات المنظمة."
+            )
+
+        words = reason.split()
+
+        if len(words) > 30:
+            reason = (
+                " ".join(words[:30]).rstrip(
+                    "،,."
+                )
+                + "."
+            )
+
+        ranked.append({
+            "advisor_id": advisor_id,
+            "score": round(score, 4),
+            "role": role,
+            "matched_need_ids": matched_need_ids,
+            "reason": reason,
+        })
+
+        seen_advisors.add(
+            advisor_id
+        )
+
+    ranked.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    return ranked
+
+
+def advisory_match_grounded_v5(
+    job_input,
+    token,
+):
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_grounded_router_model(
+        token
+    )
+
+    print(
+        "Stage 1/2: extracting grounded advisory needs...",
+        flush=True,
+    )
+
+    extraction = extract_grounded_advisory_needs(
+        organization,
+        programs,
+    )
+
+    needs = extraction["needs"]
+
+    print(
+        f"Grounded needs extracted: {len(needs)}",
+        flush=True,
+    )
+
+    if not needs:
+        response = {
+            "status": "completed",
+            "type": "advisory_match",
+            "routing_engine": "grounded_v5",
+            "run_id": job_input.get("run_id"),
+            "organization_name": organization.get("name"),
+            "needs_count": 0,
+            "ranked": [],
+        }
+
+        if job_input.get("debug", False):
+            response["needs"] = []
+            response["need_extraction_input_tokens"] = extraction[
+                "input_tokens"
+            ]
+
+        return response
+
+    print(
+        "Stage 2/2: comparing all advisors together...",
+        flush=True,
+    )
+
+    routing = route_all_advisors(
+        needs
+    )
+
+    ranked = validate_global_ranking(
+        routing["raw_ranked"],
+        needs,
+    )
+
+    response = {
+        "status": "completed",
+        "type": "advisory_match",
+        "routing_engine": "grounded_v5",
+        "run_id": job_input.get("run_id"),
+        "organization_name": organization.get("name"),
+        "needs_count": len(needs),
+        "ranked": [
+            {
+                "advisor_id": row["advisor_id"],
+                "score": row["score"],
+                "reason": row["reason"],
+            }
+            for row in ranked
+        ],
+    }
+
+    if job_input.get("debug", False):
+        response["needs"] = needs
+        response["routing_details"] = ranked
+        response["need_extraction_input_tokens"] = extraction[
+            "input_tokens"
+        ]
+        response["routing_input_tokens"] = routing[
+            "input_tokens"
+        ]
+
+    return response
+
+
 def normalize_advisory_input(raw_input):
 
     # Prefer a real JSON object, but temporarily accept
@@ -1143,7 +1948,7 @@ def handler(job):
                 token,
             )
 
-        return advisory_match_inference(
+        return advisory_match_grounded_v5(
             job_input,
             token,
         )

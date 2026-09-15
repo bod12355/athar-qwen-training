@@ -4618,6 +4618,83 @@ def advisory_match_rich_v21(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v22 — compact 35-advisor routing context
+#
+# Fixes:
+# - v21 could exceed RICH_MAX_INPUT_TOKENS because all 35 routing cards
+#   were too verbose (example: 20,680 > 20,000 tokens).
+# - Keep the 20k safety limit.
+# - Send only the fields required for advisor routing.
+# - Arabic-only output guard from v21 remains active.
+# ---------------------------------------------------------------------
+
+def _v18_routing_cards(advisors):
+    """
+    Compact routing cards for 35 advisors.
+
+    We intentionally keep only:
+    - registered system code
+    - Arabic advisor name
+    - functional/sector class
+    - owned outcome
+    - core owned areas
+    - strongest activation conditions
+    - strongest non-primary conditions
+
+    Full DNA remains in the registry; it is not necessary to inject the
+    entire DNA into every global routing call.
+    """
+
+    cards = []
+
+    for advisor in advisors:
+        advisor_num = int(
+            advisor.get("advisor_id")
+        )
+
+        advisor_class = (
+            "SECTOR"
+            if advisor_num >= 26
+            else "FUNCTIONAL"
+        )
+
+        cards.append({
+            "system_code": advisor.get(
+                "system_code"
+            ),
+            "advisor_name": advisor.get(
+                "name_ar",
+                advisor.get("name_en"),
+            ),
+            "advisor_class": advisor_class,
+            "owned_outcome": advisor.get(
+                "owned_outcome"
+            ),
+            "owns": (
+                advisor.get("owns") or []
+            )[:6],
+            "activation_when": (
+                advisor.get("activation_when") or []
+            )[:6],
+            "not_primary_when": (
+                advisor.get("not_primary_when") or []
+            )[:3],
+        })
+
+    return cards
+
+
+def advisory_match_rich_v22(job_input):
+    """
+    v22 reuses the complete v21 pipeline and Arabic-only language guard,
+    but with the compact 35-advisor routing cards defined above.
+    """
+    return advisory_match_rich_v21(
+        job_input
+    )
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -6557,7 +6634,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v21(
+        return advisory_match_rich_v22(
             job_input
         )
 

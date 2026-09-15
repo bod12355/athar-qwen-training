@@ -205,7 +205,7 @@ role يجب أن يكون primary أو supporting.
 
 RICH_REGISTRY_PATH = os.environ.get(
     "RICH_REGISTRY_PATH",
-    f"{ROOT}/data/advisors_registry_rich_v3.json"
+    f"{ROOT}/data/advisors_registry_rich_v4_35.json"
 )
 
 RICH_MAX_INPUT_TOKENS = int(
@@ -231,7 +231,7 @@ RICH_ROUTER_SYSTEM_PROMPT = """أنت Athar OS Rich Advisor Router.
 مهمتك تقييم الـ16 مستشارًا جميعًا باستخدام ملفات Expert DNA الغنية، ثم إرجاع كل المستشارين المناسبين فعلاً فقط.
 
 قواعد حاسمة:
-1) فكّر في الـ16 جميعًا قبل الإخراج.
+1) فكّر في الـ35 جميعًا قبل الإخراج.
 2) لا يوجد عدد ثابت؛ قد يكون المناسب 2 أو 5 أو 8 أو أكثر.
 3) لا تشترط وجود كلمة "تحتاج" أو "مشكلة". الملاءمة قد تأتي من:
    - فجوة أو مخاطرة صريحة.
@@ -361,9 +361,34 @@ def load_rich_registry():
 
     advisors = registry.get("advisors", [])
 
-    if len(advisors) != 16:
+    if len(advisors) != 35:
         raise RuntimeError(
-            f"Rich registry must contain exactly 16 advisors; got {len(advisors)}"
+            f"Rich registry must contain exactly 35 advisors; got {len(advisors)}"
+        )
+
+    advisor_ids = [
+        int(advisor.get("advisor_id"))
+        for advisor in advisors
+    ]
+
+    if advisor_ids != list(range(1, 36)):
+        raise RuntimeError(
+            f"Rich registry advisor IDs must be 1..35; got {advisor_ids}"
+        )
+
+    system_codes = [
+        str(advisor.get("system_code", "")).strip()
+        for advisor in advisors
+    ]
+
+    if any(not code for code in system_codes):
+        raise RuntimeError(
+            "Every rich advisor must have a non-empty system_code."
+        )
+
+    if len(system_codes) != len(set(system_codes)):
+        raise RuntimeError(
+            "Rich advisor system_code values must be unique."
         )
 
     return registry
@@ -1098,7 +1123,7 @@ RICH_V11_REVIEW_PROMPT = """أنت Athar OS Adversarial Routing Adjudicator.
 
 لديك:
 1) FACTS موثقة عن المنظمة وبرامجها.
-2) ملفات Expert DNA للـ16 مستشارًا.
+2) ملفات Expert DNA للـ35 مستشارًا.
 3) PROPOSED_MATCHES من مرحلة AI أولى.
 
 مهمتك مراجعة كل ترشيح بصرامة ثم الاحتفاظ فقط بالمستشارين الذين توجد لهم حاجة أو فرصة تحسين مادية حقيقية الآن.
@@ -1424,9 +1449,9 @@ RICH_V12_MATCH_PROMPT = """أنت Athar OS Global Advisor Matching Engine.
 ستستلم:
 1) FACTS موثقة.
 2) NEEDS تم استخراجها مستقلًا قبل رؤية المستشارين.
-3) ملفات Expert DNA الغنية للـ16 مستشارًا.
+3) ملفات Expert DNA الغنية للـ35 مستشارًا.
 
-مهمتك مقارنة الـ16 جميعًا معًا وإرجاع كل مستشار مناسب ماديًا لاحتياج واحد أو أكثر من NEEDS.
+مهمتك مقارنة الـ35 جميعًا معًا وإرجاع كل مستشار مناسب ماديًا لاحتياج واحد أو أكثر من NEEDS.
 
 قواعد حاسمة:
 - ممنوع اختراع احتياج جديد في هذه المرحلة.
@@ -1852,9 +1877,9 @@ RICH_V13_MATCH_PROMPT = """أنت Athar OS Global Advisor Matching Engine v13.
 ستستلم:
 1) FACTS موثقة.
 2) VALIDATED_NEEDS تم اكتشافها ومراجعتها قبل رؤية المستشارين.
-3) ملفات Expert DNA الغنية للـ16 مستشارًا.
+3) ملفات Expert DNA الغنية للـ35 مستشارًا.
 
-قارن الـ16 جميعًا معًا وأخرج كل مستشار يملك قيمة مستقلة ومادية مرتبطة مباشرة بـ VALIDATED_NEEDS.
+قارن الـ35 جميعًا معًا وأخرج كل مستشار يملك قيمة مستقلة ومادية مرتبطة مباشرة بـ VALIDATED_NEEDS.
 
 قاعدة الملكية:
 لا يكفي أن "يساعد" المستشار. يجب أن يكون الاحتياج داخل owned_outcome أو core scope أو activation_when له بوضوح.
@@ -2631,7 +2656,7 @@ RICH_V17_POOL_PROMPT = """أنت Athar OS Advisor Candidate Pool Engine v17.
 ستستلم:
 1) FACTS موثقة عن الجمعية وبرامجها.
 2) VALIDATED_NEEDS تم اكتشافها ومراجعتها قبل رؤية المستشارين.
-3) ملفات Expert DNA الغنية للـ16 مستشارًا.
+3) ملفات Expert DNA الغنية للـ35 مستشارًا.
 
 المعيار ليس "هل هذا المستشار ضروري وحده؟"
 المعيار هو:
@@ -3235,7 +3260,7 @@ def advisory_match_rich_v17(job_input):
 
 
 # ---------------------------------------------------------------------
-# Rich AI Router v18
+# Rich AI Router v19
 # Key changes:
 # 1) Never tell the advisor matcher to "fill" a target count.
 # 2) Discover grounded NEEDS + OPPORTUNITIES before seeing advisors.
@@ -3255,7 +3280,7 @@ RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS = int(
 )
 
 RICH_V18_MATCH_MAX_NEW_TOKENS = int(
-    os.environ.get("RICH_V18_MATCH_MAX_NEW_TOKENS", "1800")
+    os.environ.get("RICH_V18_MATCH_MAX_NEW_TOKENS", "2800")
 )
 
 RICH_V18_THEME_EXPAND_MAX_NEW_TOKENS = int(
@@ -3266,7 +3291,7 @@ RICH_V18_DESIRED_CHOICE_POOL_MIN = int(
     os.environ.get("RICH_V18_DESIRED_CHOICE_POOL_MIN", "7")
 )
 
-RICH_V18_THEME_PROMPT = """أنت Athar OS Advisory Theme Discovery Engine v18.
+RICH_V18_THEME_PROMPT = """أنت Athar OS Advisory Theme Discovery Engine v19.
 
 ستستلم FACTS فقط عن الجمعية وبرامجها. لا ترى أي مستشارين في هذه المرحلة.
 
@@ -3311,7 +3336,7 @@ THEME جملة عربية واضحة ومحددة
 ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
 """
 
-RICH_V18_THEME_REVIEW_PROMPT = """أنت Athar OS Advisory Theme Validator v18.
+RICH_V18_THEME_REVIEW_PROMPT = """أنت Athar OS Advisory Theme Validator v19.
 
 راجع CANDIDATE_THEMES مقابل FACTS فقط. لا ترى المستشارين.
 
@@ -3367,14 +3392,14 @@ THEME_ID|TYPE|PRIORITY|EVIDENCE_IDS|THEME
 ممنوع JSON وممنوع Markdown وممنوع شرح إضافي.
 """
 
-RICH_V18_MATCH_PROMPT = """أنت Athar OS Global Advisor Relevance Engine v18.
+RICH_V18_MATCH_PROMPT = """أنت Athar OS Global Advisor Relevance Engine v19.
 
 ستستلم:
 1) FACTS موثقة.
 2) VALIDATED_THEMES تم اكتشافها والتحقق منها قبل رؤية المستشارين.
-3) ROUTING_CARDS للـ16 مستشارًا، وكل بطاقة لها system_code وهو الهوية الوحيدة المسموح باستخدامها.
+3) ROUTING_CARDS للـ35 مستشارًا، وكل بطاقة لها system_code وهو الهوية الوحيدة المسموح باستخدامها.
 
-مهمتك تقييم الـ16 جميعًا عالميًا وباستقلالية.
+مهمتك تقييم الـ35 جميعًا عالميًا وباستقلالية.
 لا يوجد Target Count هنا. لا تقلل العدد ولا تكبره.
 أخرج كل مستشار مرتبط فعلاً بثيم واحد أو أكثر، واستبعد القرب العام.
 
@@ -3710,6 +3735,8 @@ def _parse_v18_theme_review(
 
 
 def _v18_routing_cards(advisors):
+    """Build compact routing-only cards so all 35 advisors fit in one global comparison."""
+
     cards = []
 
     for advisor in advisors:
@@ -3719,12 +3746,13 @@ def _v18_routing_cards(advisors):
                 "name_ar",
                 advisor.get("name_en"),
             ),
+            "group": advisor.get("group"),
             "mission": advisor.get("mission"),
             "owned_outcome": advisor.get("owned_outcome"),
-            "activation_when": advisor.get("activation_when"),
-            "not_primary_when": advisor.get("not_primary_when"),
-            "boundaries": advisor.get("boundaries"),
-            "typical_outputs": advisor.get("typical_outputs"),
+            "owns": (advisor.get("owns") or [])[:6],
+            "activation_when": (advisor.get("activation_when") or [])[:7],
+            "not_primary_when": (advisor.get("not_primary_when") or [])[:4],
+            "boundaries": (advisor.get("boundaries") or [])[:3],
         })
 
     return cards
@@ -3864,7 +3892,7 @@ def _parse_v18_matches(
     return matches
 
 
-def advisory_match_rich_v18(job_input):
+def advisory_match_rich_v19(job_input):
     organization, programs = normalize_advisory_input(
         job_input.get("input", {})
     )
@@ -3888,7 +3916,7 @@ def advisory_match_rich_v18(job_input):
 
     # Pass 1: grounded needs + opportunities, without advisors.
     print(
-        "Rich v18 pass 1: discovering grounded advisory themes...",
+        "Rich v19 pass 1: discovering grounded advisory themes...",
         flush=True,
     )
 
@@ -3905,7 +3933,7 @@ def advisory_match_rich_v18(job_input):
 
     # Pass 2: validate themes, still without advisors.
     print(
-        f"Rich v18 pass 2: validating {len(candidate_themes)} themes...",
+        f"Rich v19 pass 2: validating {len(candidate_themes)} themes...",
         flush=True,
     )
 
@@ -3933,7 +3961,7 @@ def advisory_match_rich_v18(job_input):
     # Pass 3: global match using system_code identities.
     if validated_themes:
         print(
-            f"Rich v18 pass 3: matching 16 advisors to {len(validated_themes)} validated themes...",
+            f"Rich v19 pass 3: matching 35 advisors to {len(validated_themes)} validated themes...",
             flush=True,
         )
 
@@ -3975,7 +4003,7 @@ def advisory_match_rich_v18(job_input):
         and validated_themes
     ):
         print(
-            f"Rich v18 pass 4: pool has {len(matches)} advisors; "
+            f"Rich v19 pass 4: pool has {len(matches)} advisors; "
             "searching for overlooked grounded themes, not forcing advisors...",
             flush=True,
         )
@@ -4074,7 +4102,7 @@ def advisory_match_rich_v18(job_input):
 
     if len(matches) < RICH_V18_DESIRED_CHOICE_POOL_MIN:
         print(
-            "Rich v18 warning: grounded data supports fewer than the desired "
+            "Rich v19 warning: grounded data supports fewer than the desired "
             f"{RICH_V18_DESIRED_CHOICE_POOL_MIN} advisor choices. "
             "Returning only genuinely related advisors instead of fabricating relevance.",
             flush=True,
@@ -6024,7 +6052,7 @@ def handler(job):
 
             return {
                 "status": "advisory_match_preflight_ok",
-                "routing_engine": "rich_ai_v9",
+                "routing_engine": "rich_ai_v19_35_advisors",
                 "model": MATCHER_BASE_MODEL,
                 "registry_path": RICH_REGISTRY_PATH,
                 "advisor_count": len(
@@ -6032,7 +6060,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v18(
+        return advisory_match_rich_v19(
             job_input
         )
 

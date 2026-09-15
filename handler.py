@@ -8673,6 +8673,748 @@ def advisory_match_rich_v30(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v31 — zero-generation relevance classifier
+#
+# This replaces autoregressive routing with direct next-token scoring.
+#
+# Why this is different:
+# - The already-loaded Qwen3-14B is still the AI decision maker.
+# - It DOES NOT generate routing prose or 35 output lines.
+# - For each advisor it sees only its most relevant evidence snippets.
+# - One batched forward pass scores "relevant" vs "not relevant".
+# - Score is the model probability of true current relevance.
+# - Threshold remains exactly 0.50.
+# - Public Arabic reasons are deterministic, concise, and source-grounded.
+#
+# No extra model download. No new embedding model. No generated Arabic.
+# ---------------------------------------------------------------------
+
+RICH_V31_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V31_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V31_BATCH_SIZE = int(
+    os.environ.get("RICH_V31_BATCH_SIZE", "4")
+)
+
+RICH_V31_TOP_FACTS = int(
+    os.environ.get("RICH_V31_TOP_FACTS", "6")
+)
+
+RICH_V31_MAX_PROMPT_TOKENS = int(
+    os.environ.get("RICH_V31_MAX_PROMPT_TOKENS", "2600")
+)
+
+RICH_V31_LOGIT_TEMPERATURE = float(
+    os.environ.get("RICH_V31_LOGIT_TEMPERATURE", "1.0")
+)
+
+_RICH_V31_STOPWORDS = {
+    "هذا", "هذه", "ذلك", "تلك", "التي", "الذي", "على", "إلى", "الى",
+    "عن", "من", "في", "مع", "أو", "او", "ثم", "كما", "كل", "عند",
+    "وجود", "يوجد", "توجد", "الحاجة", "احتياج", "المستشار", "مستشار",
+    "الجمعية", "المنظمة", "المؤسسة", "مجال", "مجالات", "دعم", "تحسين",
+    "تطوير", "إدارة", "ادارة", "بشكل", "ضمن", "حسب", "قبل", "بعد",
+    "العمل", "الأعمال", "خلال", "ذات", "ذو", "وهو", "وهي", "يكون",
+    "تكون", "يمكن", "قابل", "قابلة", "حالي", "حالية", "فعلي", "فعلية",
+}
+
+
+def _v31_norm_ar(text):
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    text = text.replace("ـ", "")
+    # Remove Arabic diacritics.
+    text = re.sub(r"[\u064B-\u065F\u0670\u06D6-\u06ED]", "", text)
+    text = (
+        text
+        .replace("أ", "ا")
+        .replace("إ", "ا")
+        .replace("آ", "ا")
+        .replace("ى", "ي")
+        .replace("ؤ", "و")
+        .replace("ئ", "ي")
+    )
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def _v31_tokens(text):
+    norm = _v31_norm_ar(text)
+    words = re.findall(r"[\u0600-\u06FF]{2,}", norm)
+
+    result = []
+    for word in words:
+        if word in _RICH_V31_STOPWORDS:
+            continue
+        if len(word) < 3:
+            continue
+        result.append(word)
+
+    return result
+
+
+def _v31_safe_cut(text, limit):
+    text = _v30_arabic_public_text(text)
+    text = re.sub(r"[\u064B-\u065F\u0670\u06D6-\u06ED]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if len(text) <= limit:
+        return text.rstrip(" .،؛:")
+
+    piece = text[:limit]
+    if " " in piece:
+        piece = piece.rsplit(" ", 1)[0]
+
+    return piece.rstrip(" .،؛:")
+
+
+def _v31_build_facts(organization, programs):
+    facts = _v30_build_facts(
+        organization,
+        programs,
+    )
+
+    # Structural facts derived only from the supplied payload.
+    program_count = len([
+        p for p in programs
+        if isinstance(p, dict)
+    ])
+
+    if program_count:
+        facts.append({
+            "fact_id": "C1",
+            "source": "بنية المحفظة",
+            "text": (
+                f"تحتوي الحمولة الحالية على {program_count} "
+                "برنامجًا ومشروعًا موثقًا موزعة على مجالات متعددة."
+            ),
+        })
+
+    program_blob = " ".join(
+        str(p.get("name", "")) + " "
+        + str(p.get("description", "")) + " "
+        + str(p.get("delivery_method", ""))
+        for p in programs
+        if isinstance(p, dict)
+    )
+
+    cadence_terms = (
+        "أسبوع", "اسبوع", "يومي", "دوري", "موسمي",
+        "رمضان", "شهري", "سنوي", "متكرر",
+    )
+
+    cadence_hits = sum(
+        1
+        for p in programs
+        if isinstance(p, dict)
+        and _v30_contains_any(
+            " ".join(
+                str(p.get(k, ""))
+                for k in ("name", "description", "delivery_method")
+            ),
+            cadence_terms,
+        )
+    )
+
+    if cadence_hits >= 2:
+        facts.append({
+            "fact_id": "C2",
+            "source": "تعقيد التشغيل",
+            "text": (
+                f"يوجد في الحمولة الحالية {cadence_hits} برامج أو مشاريع "
+                "على الأقل ذات طبيعة دورية أو موسمية أو متكررة، "
+                "ما يخلق احتياجًا فعليًا للتنسيق التشغيلي بين المواعيد والموارد."
+            ),
+        })
+
+    partnership_terms = (
+        "شراكة", "شراكات", "شريك", "شركاء",
+        "بالتعاون", "تعاون مع", "مستشفى", "جهة",
+    )
+
+    partnership_hits = sum(
+        1
+        for p in programs
+        if isinstance(p, dict)
+        and _v30_contains_any(
+            " ".join(
+                str(p.get(k, ""))
+                for k in ("name", "description", "delivery_method")
+            ),
+            partnership_terms,
+        )
+    )
+
+    org_text = " ".join(
+        str(organization.get(k, ""))
+        for k in (
+            "short_description",
+            "detailed_description",
+            "important_notes",
+            "competitive_advantage",
+        )
+    )
+
+    if (
+        partnership_hits >= 2
+        or _v30_contains_any(
+            org_text,
+            ("شراكات", "شركاء", "9 شراكات", "تسع شراكات"),
+        )
+    ):
+        facts.append({
+            "fact_id": "C3",
+            "source": "الشراكات في التنفيذ",
+            "text": (
+                f"يظهر التنفيذ المشترك أو الشراكات في {partnership_hits} "
+                "برامج أو مشاريع على الأقل في الحمولة الحالية، "
+                "إضافة إلى ما ورد في بيانات الجمعية عن شبكة الشراكات."
+            ),
+        })
+
+    if _v30_contains_any(
+        org_text + " " + program_blob,
+        ("متطوع", "متطوعين", "تطوع", "فرص تطوعية"),
+    ):
+        facts.append({
+            "fact_id": "C4",
+            "source": "منظومة التطوع",
+            "text": (
+                "تتضمن بيانات الجمعية منظومة تطوع فعلية تشمل متطوعين "
+                "وفرصًا تطوعية وأنشطة تطوعية مرتبطة بتنفيذ البرامج."
+            ),
+        })
+
+    return facts
+
+
+def _v31_advisor_query(advisor):
+    pieces = [
+        advisor.get("name_ar"),
+        advisor.get("mission"),
+        advisor.get("owned_outcome"),
+    ]
+
+    pieces.extend((advisor.get("owns") or [])[:8])
+    pieces.extend((advisor.get("activation_when") or [])[:8])
+
+    return " ".join(
+        str(x)
+        for x in pieces
+        if x
+    )
+
+
+def _v31_fact_relevance(advisor, fact):
+    query_text = _v31_advisor_query(advisor)
+    query_tokens = _v31_tokens(query_text)
+    fact_tokens = _v31_tokens(fact.get("text"))
+
+    if not query_tokens or not fact_tokens:
+        return 0.0
+
+    qset = set(query_tokens)
+    fset = set(fact_tokens)
+
+    overlap = qset & fset
+
+    # Weighted lexical overlap.
+    score = sum(
+        1.0 + min(len(token), 8) / 8.0
+        for token in overlap
+    )
+
+    score /= max(3.0, len(fset) ** 0.5)
+
+    # Activation phrase coverage bonus.
+    for phrase in (advisor.get("activation_when") or [])[:8]:
+        ptokens = set(_v31_tokens(phrase))
+        if not ptokens:
+            continue
+
+        coverage = len(ptokens & fset) / len(ptokens)
+
+        if coverage >= 0.55:
+            score += 2.0 * coverage
+        elif coverage >= 0.35:
+            score += 0.8 * coverage
+
+    # Ownership phrase bonus.
+    for phrase in (advisor.get("owns") or [])[:8]:
+        ptokens = set(_v31_tokens(phrase))
+        if not ptokens:
+            continue
+
+        coverage = len(ptokens & fset) / len(ptokens)
+        if coverage >= 0.5:
+            score += 1.0 * coverage
+
+    # Generic org-name/type facts are not useful routing evidence.
+    if fact.get("fact_id") in {"O1", "O2"}:
+        score *= 0.05
+
+    # Computed structural facts are intentionally strong for the
+    # specialist domains they describe.
+    fid = fact.get("fact_id")
+    advisor_num = int(advisor.get("advisor_id"))
+
+    if fid == "C1" and advisor_num == 13:
+        score += 5.0
+    elif fid == "C2" and advisor_num == 12:
+        score += 5.0
+    elif fid == "C3" and advisor_num == 4:
+        score += 5.0
+    elif fid == "C4" and advisor_num == 33:
+        score += 5.0
+
+    return float(score)
+
+
+def _v31_top_facts(advisor, facts):
+    ranked = sorted(
+        (
+            (_v31_fact_relevance(advisor, fact), fact)
+            for fact in facts
+        ),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    selected = []
+
+    for score, fact in ranked:
+        if len(selected) >= RICH_V31_TOP_FACTS:
+            break
+
+        # Always allow strongest structural facts; ordinary facts need
+        # at least some lexical/activation relationship.
+        if score <= 0 and not str(fact.get("fact_id", "")).startswith("C"):
+            continue
+
+        if fact.get("fact_id") in {"O1", "O2"}:
+            continue
+
+        selected.append({
+            "fact_id": fact["fact_id"],
+            "source": fact.get("source"),
+            "text": _v31_safe_cut(
+                fact.get("text"),
+                430,
+            ),
+            "_retrieval_score": round(score, 4),
+        })
+
+    return selected
+
+
+def _v31_card(advisor):
+    advisor_num = int(advisor.get("advisor_id"))
+
+    return {
+        "system_code": advisor.get("system_code"),
+        "name": advisor.get("name_ar"),
+        "class": (
+            "SECTOR"
+            if advisor_num >= 26
+            else "FUNCTIONAL"
+        ),
+        "mission": _v31_safe_cut(
+            advisor.get("mission"),
+            230,
+        ),
+        "owned_outcome": _v31_safe_cut(
+            advisor.get("owned_outcome"),
+            260,
+        ),
+        "activation_when": [
+            _v31_safe_cut(x, 140)
+            for x in (advisor.get("activation_when") or [])[:6]
+        ],
+        "not_primary_when": [
+            _v31_safe_cut(x, 140)
+            for x in (advisor.get("not_primary_when") or [])[:4]
+        ],
+        "boundaries": [
+            _v31_safe_cut(x, 160)
+            for x in (advisor.get("boundaries") or [])[:3]
+        ],
+    }
+
+
+RICH_V31_CLASSIFIER_SYSTEM = """
+أنت مصنف ملاءمة لمستشار واحد في منظومة أثر.
+
+المطلوب قرار واحد فقط:
+1 = المستشار مرتبط حاليًا ارتباطًا حقيقيًا وماديًا بالجمعية.
+0 = لا توجد ملاءمة حالية كافية.
+
+للمستشار FUNCTIONAL:
+اختر 1 فقط إذا أظهرت الأدلة حاجة أو قرارًا أو فجوة أو تعقيدًا حاليًا
+يقع مباشرة داخل ملكية المستشار.
+مجرد وجود المجال في الجمعية لا يكفي.
+غياب معلومة ليس احتياجًا.
+إنجاز مرتفع ليس فجوة.
+المتطوعون وحدهم ليسوا حاجة موارد بشرية.
+وجود برامج وحده لا يعني حاجة مالية أو تشغيلية أو بيانات أو اتصال.
+لكن تعقيد محفظة كبير، تشغيل متكرر متعدد الموارد، أو اعتماد فعلي على شبكة
+شراكات يمكن أن يكون تفعيلًا حقيقيًا للمستشار المختص.
+
+للمستشار SECTOR:
+اختر 1 إذا كان القطاع نفسه جوهريًا ومتكررًا في رسالة الجمعية أو أهدافها
+أو محفظة برامجها، حتى دون وجود مشكلة.
+نشاط واحد عابر أو كلمة عابرة لا يكفي.
+
+التزم بحدود بطاقة المستشار.
+لا تخترع معلومات غير موجودة.
+إذا كانت الأدلة ملتبسة أو مجرد احتمال فاختر 0.
+
+اكتب رقمًا واحدًا فقط: 1 أو 0.
+"""
+
+
+def _v31_prompt_for_advisor(advisor, selected_facts):
+    payload = {
+        "advisor": _v31_card(advisor),
+        "evidence": [
+            {
+                "fact_id": f["fact_id"],
+                "source": f.get("source"),
+                "text": f.get("text"),
+            }
+            for f in selected_facts
+        ],
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": RICH_V31_CLASSIFIER_SYSTEM,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+
+    return _RICH_TOKENIZER.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+
+def _v31_label_ids():
+    positive = _RICH_TOKENIZER.encode(
+        "1",
+        add_special_tokens=False,
+    )
+    negative = _RICH_TOKENIZER.encode(
+        "0",
+        add_special_tokens=False,
+    )
+
+    if len(positive) != 1 or len(negative) != 1:
+        raise ValueError(
+            "Rich v31 requires single-token labels 1 and 0."
+        )
+
+    return positive[0], negative[0]
+
+
+def _v31_forward_scores(prompts):
+    import inspect
+    import torch
+
+    pos_id, neg_id = _v31_label_ids()
+
+    results = []
+    batch_size = max(1, RICH_V31_BATCH_SIZE)
+
+    start = 0
+
+    while start < len(prompts):
+        current = prompts[start:start + batch_size]
+
+        encoded = _RICH_TOKENIZER(
+            current,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=RICH_V31_MAX_PROMPT_TOKENS,
+            add_special_tokens=False,
+        )
+
+        encoded = {
+            k: v.to(_RICH_DEVICE)
+            for k, v in encoded.items()
+        }
+
+        forward_kwargs = dict(encoded)
+
+        try:
+            signature = inspect.signature(
+                _RICH_MODEL.forward
+            )
+            if "logits_to_keep" in signature.parameters:
+                forward_kwargs["logits_to_keep"] = 1
+        except Exception:
+            pass
+
+        try:
+            with torch.inference_mode():
+                outputs = _RICH_MODEL(
+                    **forward_kwargs
+                )
+        except torch.cuda.OutOfMemoryError:
+            if batch_size <= 1:
+                raise
+
+            torch.cuda.empty_cache()
+            batch_size = max(1, batch_size // 2)
+
+            print(
+                f"Rich v31 reduced classifier batch size to {batch_size} after CUDA OOM.",
+                flush=True,
+            )
+            continue
+
+        logits = outputs.logits
+
+        # With logits_to_keep=1 -> [B, 1, V].
+        # Otherwise left padding ensures the final sequence position is
+        # the assistant generation point for every row.
+        last_logits = logits[:, -1, :].float()
+
+        pair = torch.stack(
+            [
+                last_logits[:, neg_id],
+                last_logits[:, pos_id],
+            ],
+            dim=-1,
+        )
+
+        temperature = max(
+            0.05,
+            float(RICH_V31_LOGIT_TEMPERATURE),
+        )
+
+        probs = torch.softmax(
+            pair / temperature,
+            dim=-1,
+        )[:, 1]
+
+        results.extend(
+            float(x)
+            for x in probs.detach().cpu().tolist()
+        )
+
+        del outputs
+        del logits
+        del last_logits
+        del pair
+        del encoded
+
+        start += len(current)
+
+    return results
+
+
+def _v31_fact_summary(fact):
+    fid = str(fact.get("fact_id", ""))
+    text = _v31_safe_cut(
+        fact.get("text"),
+        150,
+    )
+
+    if fid.startswith("P"):
+        m = re.search(
+            r'(?:برنامج|مشروع)\s+"([^"]+)"',
+            text,
+        )
+        if m:
+            return f'«{_v31_safe_cut(m.group(1), 90)}»'
+
+    if fid.startswith("C"):
+        return _v31_safe_cut(text, 135)
+
+    # Prefer the first meaningful clause for notes/descriptions.
+    pieces = re.split(r"[؛.!؟]", text)
+    for piece in pieces:
+        piece = _v31_safe_cut(piece, 125)
+        if len(piece) >= 18:
+            return piece
+
+    return _v31_safe_cut(text, 125)
+
+
+def _v31_public_reason(advisor, selected_facts):
+    name = _v31_safe_cut(
+        advisor.get("name_ar") or "هذا المستشار",
+        100,
+    )
+
+    summaries = []
+
+    for fact in selected_facts[:3]:
+        summary = _v31_fact_summary(fact)
+
+        if (
+            summary
+            and summary not in summaries
+        ):
+            summaries.append(summary)
+
+        if len(summaries) == 2:
+            break
+
+    advisor_num = int(advisor.get("advisor_id"))
+    is_sector = advisor_num >= 26
+
+    if not summaries:
+        return (
+            f"يرتبط {name} بالحالة الحالية لأن الأدلة الموثقة في بيانات الجمعية "
+            "تقع مباشرة ضمن نطاق اختصاصه وتدعم إشراكه في التقييم الاستشاري."
+        )
+
+    if len(summaries) == 1:
+        evidence_phrase = summaries[0]
+    else:
+        evidence_phrase = (
+            summaries[0]
+            + "، وكذلك "
+            + summaries[1]
+        )
+
+    if is_sector:
+        reason = (
+            f"يرتبط {name} بالجمعية استنادًا إلى {evidence_phrase}. "
+            "وتثبت هذه الوقائع حضورًا فعليًا ومتكررًا لهذا القطاع في عمل الجمعية، "
+            "لذلك تقع الملاءمة مباشرة ضمن نطاق اختصاصه."
+        )
+    else:
+        reason = (
+            f"يرتبط {name} بالجمعية استنادًا إلى {evidence_phrase}. "
+            "وتوضح هذه الوقائع حاجة أو تعقيدًا حاليًا يقع مباشرة ضمن نطاق اختصاصه، "
+            "دون افتراض فجوات غير مذكورة في بيانات الجمعية."
+        )
+
+    return _v30_arabic_public_text(
+        reason
+    )
+
+
+def advisory_match_rich_v31(job_input):
+    started = time.time()
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = _v31_build_facts(
+        organization,
+        programs,
+    )
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    prompts = []
+    evidence_by_code = {}
+    advisor_by_code = {}
+
+    for advisor in advisors:
+        code = advisor.get("system_code")
+        if not code:
+            continue
+
+        selected = _v31_top_facts(
+            advisor,
+            facts,
+        )
+
+        evidence_by_code[code] = selected
+        advisor_by_code[code] = advisor
+
+        prompts.append({
+            "advisor_id": code,
+            "prompt": _v31_prompt_for_advisor(
+                advisor,
+                selected,
+            ),
+        })
+
+    print(
+        f"Rich v31: scoring {len(prompts)} advisors with zero generated tokens...",
+        flush=True,
+    )
+
+    probabilities = _v31_forward_scores(
+        [
+            item["prompt"]
+            for item in prompts
+        ]
+    )
+
+    matches = []
+
+    for item, probability in zip(
+        prompts,
+        probabilities,
+    ):
+        code = item["advisor_id"]
+
+        if probability < RICH_V31_MIN_PUBLIC_SCORE:
+            continue
+
+        advisor = advisor_by_code[code]
+        selected = evidence_by_code[code]
+
+        # Do not expose a positive result with no usable evidence.
+        if not selected:
+            continue
+
+        matches.append({
+            "advisor_id": code,
+            "score": round(
+                float(probability),
+                4,
+            ),
+            "reason": _v31_public_reason(
+                advisor,
+                selected,
+            ),
+        })
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    elapsed = round(
+        time.time() - started,
+        2,
+    )
+
+    print(
+        f"Rich v31 complete in {elapsed}s. "
+        f"Returned {len(matches)} advisors >= "
+        f"{RICH_V31_MIN_PUBLIC_SCORE:.2f}. "
+        "Autoregressive routing generations: 0.",
+        flush=True,
+    )
+
+    return {
+        "ranked": matches
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -10604,7 +11346,7 @@ def handler(job):
 
             return {
                 "status": "advisory_match_preflight_ok",
-                "routing_engine": "rich_ai_v30_fast_grounded_arabic",
+                "routing_engine": "rich_ai_v31_zero_generation_classifier",
                 "model": MATCHER_BASE_MODEL,
                 "registry_path": RICH_REGISTRY_PATH,
                 "advisor_count": len(
@@ -10612,7 +11354,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v30(
+        return advisory_match_rich_v31(
             job_input
         )
 

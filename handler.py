@@ -5993,6 +5993,442 @@ def advisory_match_rich_v26(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v27 — final grounded adjudication for all 35 advisors
+#
+# Goal:
+# 1) Score all 35 advisors independently.
+# 2) Run one final AI adjudication over ALL 35, not just initial >= 0.50.
+# 3) Final KEEP requires a concrete activation fact.
+# 4) Mere "could help / maybe / no clear evidence" is DROP.
+# 5) Public output contains every FINAL KEEP advisor with score >= 0.50.
+# 6) Final reasons are rewritten in clean Arabic.
+# ---------------------------------------------------------------------
+
+RICH_V27_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V27_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V27_FINAL_PROMPT = """
+أنت الحكم النهائي لاختيار مستشاري منظومة أثر.
+
+ستستلم:
+FACTS = الوقائع الموثقة عن الجمعية وبرامجها.
+INITIAL_SCORES = التقييم الأولي لكل المستشارين الخمسة والثلاثين.
+ROUTING_CARDS = بطاقات مختصرة لكل المستشارين الخمسة والثلاثين.
+
+مهمتك:
+أعد تقييم جميع المستشارين الخمسة والثلاثين بصورة مستقلة، ثم اتخذ قرارًا نهائيًا لكل مستشار:
+KEEP أو DROP.
+
+لا تعتمد على الدرجة الأولية بوصفها حقيقة.
+هي مجرد رأي أولي قابل للرفع أو الخفض.
+القرار النهائي يجب أن يعتمد على FACTS ونطاق المستشار فقط.
+
+المعيار النهائي للدرجة:
+- 90-100: ارتباط مباشر ومحوري ومثبت بقوة.
+- 80-89: ارتباط مباشر وقوي ومادي.
+- 70-79: ارتباط واضح ومهم.
+- 60-69: ارتباط حقيقي ومثبت لكنه أقل مركزية.
+- 50-59: ارتباط حقيقي ومادي وله واقعة تفعيل محددة.
+- 40-49: احتمال أو فائدة ممكنة لكن الدليل غير كافٍ للترشيح.
+- أقل من 40: غير مرتبط بالحاجة الحالية.
+
+قاعدة حاسمة:
+الدرجة 50 أو أكثر لا تعني "قد يكون مفيدًا".
+الدرجة 50 أو أكثر تعني أن هناك واقعة حالية محددة في FACTS تبرر إدخال هذا المستشار الآن.
+
+========================
+المستشارون الوظيفيون
+========================
+للمستشار الوظيفي:
+لا يكفي أن يكون مجاله موجودًا في الجمعية.
+يجب أن توجد حاجة أو قرار أو فجوة أو تعقيد حالي يقع داخل ملكيته.
+
+أمثلة إلزامية:
+- وجود حوكمة مرتفعة ليس سببًا لإدخال مستشار الحوكمة، بل العكس ما لم توجد فجوة أو متطلبات حوكمة جديدة.
+- وجود رؤية ورسالة واضحة ليس سببًا لإدخال مستشار الهوية.
+- وجود أهداف استراتيجية واضحة ليس سببًا لإدخال مستشار القضايا والأهداف.
+- وجود استراتيجية ليس سببًا لإدخال مستشار التخطيط الاستراتيجي ما لم توجد مراجعة أو مفاضلة أو تحديث أو قرار استراتيجي حقيقي.
+- وجود أرقام ليس سببًا لإدخال مستشار مؤشرات الأداء.
+- وجود بيانات ليس سببًا لإدخال مستشار المتابعة والتقييم.
+- وجود أموال أو تمويل ليس سببًا لإدخال المستشار المالي أو تنمية الموارد.
+- وجود موظفين ليس سببًا لإدخال مستشار الموارد البشرية.
+- وجود عمليات ليس سببًا لإدخال مستشار العمليات.
+- وجود موقع أو قنوات رقمية ليس سببًا لإدخال مستشار التسويق أو التحول الرقمي.
+- تعدد البرامج والمسارات بصورة كبيرة ومادية يمكن أن يبرر مستشار المحافظ والبرامج والمشاريع.
+- التشغيل المتكرر أو الموسمي أو متعدد الموارد والشركاء يمكن أن يبرر مستشار التخطيط التشغيلي.
+- الاعتماد الفعلي على شبكة شراكات متعددة لتنفيذ البرامج يمكن أن يبرر مستشار أصحاب المصلحة والشراكات.
+
+إذا كان السبب الوحيد هو:
+"الجمعية لديها برامج متعددة ولذلك تحتاج..."
+فهذا غير كافٍ وحده لمعظم المستشارين الوظيفيين.
+
+========================
+المستشارون القطاعيون
+========================
+للمستشار القطاعي:
+يمكن أن يكون KEEP إذا كان القطاع نفسه جوهريًا ومتكررًا في رسالة الجمعية أو أهدافها أو محفظة برامجها، حتى لو لم توجد "مشكلة" داخل القطاع.
+
+لكن:
+- نشاط عابر واحد لا يكفي.
+- ذكر كلمة في الوصف لا يكفي.
+- يجب أن يكون هناك حضور مادي ومتكرر أو هدف صريح وجوهري.
+
+========================
+منع الاختلاق
+========================
+ممنوع تمامًا اختراع:
+- فجوة.
+- مشكلة.
+- ضعف.
+- تحدٍ.
+- حاجة تمويلية.
+- حاجة تنظيمية.
+- حاجة للتحول.
+- حاجة للجودة.
+- حاجة للبيانات.
+إذا لم تظهر في FACTS.
+
+إذا كتبت في السبب أي معنى مثل:
+"لا توجد أدلة"
+"لا توجد فجوة"
+"قد يحتاج"
+"حاجة محتملة"
+"ربما"
+"قد يشير"
+فقرار المستشار يجب أن يكون DROP ودرجته أقل من 50.
+
+========================
+حدود التخصص
+========================
+كل مستشار يجب أن يبرر من خلال ملكيته الفعلية.
+لا تنسب إدارة الشراكات لمستشار التطوع.
+لا تنسب الحقوق لمستشار الخدمات الاجتماعية إذا كان السبب قانونيًا أو مناصرة.
+لا تنسب إدارة المحفظة للمستشار التنفيذي إذا كان السبب يخص المحافظ والبرامج.
+إذا كان السبب الحقيقي يخص مستشارًا آخر، خفض الدرجة أو اختر DROP.
+
+========================
+اللغة
+========================
+- السبب النهائي عربي سليم وواضح فقط.
+- أصلح الأخطاء الإملائية والنحوية.
+- ممنوع الحروف الإنجليزية أو الروسية أو الصينية أو أي أبجدية غير عربية داخل REASON.
+- SYSTEM_CODE يبقى كما هو لأنه رمز تقني.
+- لا تكتب اختصارات أجنبية داخل السبب.
+
+========================
+الإخراج
+========================
+أخرج سطرًا واحدًا لكل مستشار من الخمسة والثلاثين بلا استثناء:
+
+SYSTEM_CODE|DECISION|FINAL_SCORE|EVIDENCE_IDS|REASON
+
+DECISION:
+KEEP
+أو
+DROP
+
+FINAL_SCORE:
+رقم من 0 إلى 100.
+
+EVIDENCE_IDS:
+من FACTS فقط، من 1 إلى 4 معرفات.
+إذا لا يوجد دليل كافٍ اكتب NONE.
+
+REASON:
+- إذا KEEP: سبب عربي من 25 إلى 50 كلمة يذكر الواقعة الفعلية والقيمة المحددة التي يضيفها المستشار.
+- إذا DROP: سبب عربي قصير يوضح لماذا لا يوجد تفعيل كافٍ.
+- لا تخترع أي معلومة.
+- ممنوع JSON.
+- ممنوع Markdown.
+- ممنوع أي شرح إضافي.
+
+لا يوجد عدد مطلوب للمستشارين.
+قد يكون العدد 4 أو 8 أو 15.
+المعيار الوحيد هو الدليل والملاءمة الحقيقية.
+"""
+
+
+def _v27_compact_cards(advisors):
+    cards = []
+
+    for advisor in advisors:
+        advisor_num = int(advisor.get("advisor_id"))
+        advisor_class = "SECTOR" if advisor_num >= 26 else "FUNCTIONAL"
+
+        cards.append({
+            "system_code": advisor.get("system_code"),
+            "advisor_name": advisor.get(
+                "name_ar",
+                advisor.get("name_en"),
+            ),
+            "advisor_class": advisor_class,
+            "owned_outcome": advisor.get("owned_outcome"),
+            "owns": (advisor.get("owns") or [])[:5],
+            "activation_when": (advisor.get("activation_when") or [])[:5],
+            "not_primary_when": (advisor.get("not_primary_when") or [])[:2],
+        })
+
+    return cards
+
+
+def _v27_parse_final(text, expected_codes, valid_fact_ids):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    rows = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+
+        code_raw, decision_raw, score_raw, evidence_raw, reason_raw = [
+            p.strip() for p in parts
+        ]
+
+        code = code_raw.strip()
+        if code not in expected_codes or code in rows:
+            continue
+
+        decision = decision_raw.upper()
+        if decision not in {"KEEP", "DROP"}:
+            continue
+
+        m = re.search(r"\d+(?:\.\d+)?", score_raw)
+        if not m:
+            continue
+
+        score = float(m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        evidence_ids = []
+        if evidence_raw.upper() != "NONE":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        rows[code] = {
+            "advisor_id": code,
+            "decision": decision,
+            "score": round(score / 100.0, 4),
+            "evidence_ids": evidence_ids[:4],
+            "reason": reason,
+        }
+
+    return rows
+
+
+def _v27_contradiction_guard(item):
+    """
+    Generic logical guard:
+    A public KEEP >= 0.50 cannot simultaneously say there is no evidence,
+    no gap, or only a possible need.
+    """
+    reason = str(item.get("reason", "")).strip()
+
+    contradiction_markers = (
+        "لا توجد أدلة",
+        "لا يوجد دليل",
+        "لا توجد فجوة",
+        "لا توجد حاجة",
+        "لا يوجد احتياج",
+        "حاجة محتملة",
+        "احتياج محتمل",
+        "قد يحتاج",
+        "قد تحتاج",
+        "ربما",
+        "قد يشير",
+        "قد تشير",
+    )
+
+    return any(marker in reason for marker in contradiction_markers)
+
+
+def advisory_match_rich_v27(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v27 pass A: initial scoring for all FUNCTIONAL advisors...",
+        flush=True,
+    )
+
+    functional_scores, _ = _v26_score_pass(
+        RICH_V26_FUNCTIONAL_PROMPT,
+        facts,
+        advisors,
+        "FUNCTIONAL",
+        valid_fact_ids,
+    )
+
+    print(
+        "Rich v27 pass B: initial scoring for all SECTOR advisors...",
+        flush=True,
+    )
+
+    sector_scores, _ = _v26_score_pass(
+        RICH_V26_SECTOR_PROMPT,
+        facts,
+        advisors,
+        "SECTOR",
+        valid_fact_ids,
+    )
+
+    initial_scores = {}
+    initial_scores.update(functional_scores)
+    initial_scores.update(sector_scores)
+
+    expected_codes = {
+        advisor.get("system_code")
+        for advisor in advisors
+        if advisor.get("system_code")
+    }
+
+    initial_payload = [
+        {
+            "advisor_id": code,
+            "initial_score": item.get("score", 0.0),
+            "evidence_ids": item.get("evidence_ids", []),
+            "activation": item.get("activation", ""),
+            "reason": item.get("reason", ""),
+        }
+        for code, item in initial_scores.items()
+    ]
+
+    routing_cards = _v27_compact_cards(advisors)
+
+    print(
+        "Rich v27 pass C: final grounded adjudication for all 35 advisors...",
+        flush=True,
+    )
+
+    try:
+        final_raw, _ = _v18_generate_text(
+            RICH_V27_FINAL_PROMPT,
+            {
+                "facts": facts,
+                "initial_scores": initial_payload,
+                "routing_cards": routing_cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+    except ValueError as exc:
+        if "input too long" not in str(exc).lower():
+            raise
+
+        # Retry with an even smaller card set while preserving every advisor.
+        smaller_cards = [
+            {
+                "system_code": card["system_code"],
+                "advisor_name": card["advisor_name"],
+                "advisor_class": card["advisor_class"],
+                "owned_outcome": card["owned_outcome"],
+                "activation_when": card["activation_when"][:3],
+            }
+            for card in routing_cards
+        ]
+
+        final_raw, _ = _v18_generate_text(
+            RICH_V27_FINAL_PROMPT,
+            {
+                "facts": facts,
+                "initial_scores": initial_payload,
+                "routing_cards": smaller_cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+    final_rows = _v27_parse_final(
+        final_raw,
+        expected_codes,
+        valid_fact_ids,
+    )
+
+    missing = expected_codes - set(final_rows.keys())
+    if missing:
+        print(
+            f"Rich v27 warning: final adjudicator omitted "
+            f"{len(missing)} advisor(s): {sorted(missing)}",
+            flush=True,
+        )
+
+    matches = []
+
+    for code, item in final_rows.items():
+        if item["decision"] != "KEEP":
+            continue
+
+        if item["score"] < RICH_V27_MIN_PUBLIC_SCORE:
+            continue
+
+        if not item.get("evidence_ids"):
+            continue
+
+        if _v27_contradiction_guard(item):
+            print(
+                f"Rich v27 contradiction guard dropped {code}.",
+                flush=True,
+            )
+            continue
+
+        matches.append(item)
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    # Final foreign-script protection from v21.
+    matches = _v21_repair_reasons(matches)
+
+    print(
+        f"Rich v27 final pool: {len(matches)} advisors with "
+        f"KEEP + score >= {RICH_V27_MIN_PUBLIC_SCORE:.2f}.",
+        flush=True,
+    )
+
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -7932,7 +8368,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v26(
+        return advisory_match_rich_v27(
             job_input
         )
 

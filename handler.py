@@ -5015,6 +5015,420 @@ def advisory_match_rich_v24(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v25 — score every advisor, then filter >= 0.50
+#
+# Core guarantee:
+# - Every one of the 35 advisors receives an AI relevance score.
+# - Two independent passes:
+#     FUNCTIONAL: advisors 1-25
+#     SECTOR: advisors 26-35
+# - The model is NOT allowed to omit low-scoring advisors.
+# - Only after all scores are parsed do we filter score >= 0.50.
+# - No theme gate can cause an empty result before scoring.
+# - Arabic-only public reasons remain enforced.
+# ---------------------------------------------------------------------
+
+RICH_V25_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V25_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V25_FUNCTIONAL_PROMPT = """
+أنت محرك تقييم ملاءمة المستشارين الوظيفيين في منظومة أثر.
+
+لديك:
+FACTS = وقائع موثقة عن الجمعية وبرامجها.
+ROUTING_CARDS = بطاقات المستشارين الوظيفيين.
+
+مهمتك:
+قيّم كل مستشار موجود في ROUTING_CARDS بلا استثناء.
+لا يجوز حذف أي مستشار من التقييم.
+أعط كل مستشار درجة من 0 إلى 100 حسب ملاءمته الحالية الفعلية للجمعية.
+
+قاعدة التقييم:
+- 90-100: احتياج مباشر ومحوري يملكه هذا المستشار.
+- 80-89: احتياج مباشر وقوي.
+- 70-79: مساهمة تكميلية واضحة ومادية.
+- 60-69: خيار ذو قيمة حقيقية ومسنودة بالأدلة.
+- 50-59: ملاءمة حقيقية لكنها أقل مركزية.
+- 0-49: غير كافٍ للترشيح الحالي.
+
+قواعد صارمة للمستشارين الوظيفيين:
+- وجود شيء ناجح في مجال المستشار لا يعني أن الجمعية تحتاجه.
+- وجود رؤية ورسالة واضحة لا يفعّل مستشار الهوية.
+- وجود أهداف استراتيجية واضحة لا يفعّل مستشار القضايا والأهداف إلا إذا وُجد احتياج لإعادة بناء أو مراجعة فعلية.
+- وجود استراتيجية لا يفعّل مستشار التخطيط الاستراتيجي دون قرار استراتيجي أو مفاضلة أو تحديث حقيقي.
+- ارتفاع الحوكمة لا يفعّل مستشار الحوكمة دون فجوة أو قرار حوكمي فعلي.
+- وجود أرقام لا يفعّل مستشار المؤشرات دون احتياج حقيقي لبناء أو تطوير نظام أداء.
+- وجود برامج لا يفعّل مستشار تصميم المبادرات إلا عند تصميم أو إعادة تصميم تدخل.
+- وجود برامج كثيرة ومتنوعة قد يفعّل مستشار المحافظ والبرامج والمشاريع إذا ظهر تعقيد محفظة حقيقي.
+- التشغيل المتكرر أو الموسمي أو متعدد الجهات والموارد قد يفعّل مستشار التخطيط التشغيلي.
+- شبكة شركاء يعتمد عليها تنفيذ الخدمات قد تفعّل مستشار أصحاب المصلحة والشراكات.
+- وجود أموال أو إيرادات لا يفعّل المستشار المالي أو تنمية الموارد تلقائيًا؛ يجب أن توجد حاجة مالية أو تمويلية فعلية موثقة.
+- لا تخترع فجوة أو مشكلة غير موجودة في FACTS.
+
+حدود التخصص:
+- لا تنسب للمستشار مخرجًا لا يملكه في ROUTING_CARD.
+- إذا كان السبب أقرب لتخصص مستشار آخر، خفّض الدرجة.
+- لا تستخدم عدد المستشارين المطلوب كعامل في الدرجة.
+
+قواعد اللغة:
+- حقل REASON عربي فقط.
+- ممنوع أي حروف إنجليزية أو روسية أو صينية أو يابانية أو كورية أو يونانية داخل REASON.
+- SYSTEM_CODE يبقى كما هو لأنه رمز تقني.
+- استخدم المصطلحات العربية بدل الكلمات الأجنبية.
+
+صيغة الإخراج الإلزامية:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|REASON
+
+تعليمات الإخراج:
+- أخرج سطرًا واحدًا لكل ROUTING_CARD، بنفس عدد البطاقات تمامًا.
+- SCORE رقم من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط، من 1 إلى 4 معرفات عند وجود دليل.
+- إذا كانت الدرجة أقل من 50 ومافيش دليل مباشر، يمكن كتابة NONE في EVIDENCE_IDS.
+- REASON يشرح سبب الدرجة باختصار وبدون اختلاق.
+- للمستشارين بدرجة 50 أو أكثر: السبب من 25 إلى 50 كلمة عربية ويذكر الوقائع والمساهمة المحددة.
+- للمستشارين أقل من 50: يكفي سبب عربي قصير يوضح لماذا لا توجد ملاءمة كافية.
+- ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+RICH_V25_SECTOR_PROMPT = """
+أنت محرك تقييم ملاءمة المستشارين القطاعيين في منظومة أثر.
+
+لديك:
+FACTS = وقائع موثقة عن الجمعية وبرامجها.
+ROUTING_CARDS = بطاقات المستشارين القطاعيين.
+
+مهمتك:
+قيّم كل مستشار موجود في ROUTING_CARDS بلا استثناء.
+لا يجوز حذف أي مستشار من التقييم.
+أعط كل مستشار درجة من 0 إلى 100 حسب مدى جوهرية قطاعه في رسالة الجمعية وأهدافها ومحفظة برامجها الحالية.
+
+قاعدة التقييم:
+- 90-100: القطاع جوهري ومحوري ومتكرر جدًا في عمل الجمعية.
+- 80-89: القطاع جوهري وله برامج وخدمات واضحة ومتكررة.
+- 70-79: القطاع مهم وله حضور مادي واضح.
+- 60-69: القطاع ذو صلة حقيقية لكنه ليس المحور الأول.
+- 50-59: صلة قطاعية حقيقية ومحدودة نسبيًا.
+- 0-49: القطاع غير مادي أو مجرد نشاط عابر.
+
+قواعد صارمة للمستشارين القطاعيين:
+- المستشار القطاعي يمكن أن يكون مناسبًا بسبب وجود محفظة برامج جوهرية في قطاعه حتى دون وجود مشكلة.
+- لا يكفي نشاط واحد عابر لرفع الدرجة إلى 50.
+- الصحة المتكررة والرعاية الصحية لكبار السن قد تفعّل مستشار الصحة.
+- الرعاية والخدمات الاجتماعية وإدارة احتياجات كبار السن قد تفعّل مستشار الخدمات الاجتماعية.
+- البرامج التعليمية أو البحثية المادية أو هدف صريح للبحث والتعليم قد تفعّل مستشار التعليم والبحث.
+- البرامج الثقافية والترفيهية المتكررة قد تفعّل مستشار الثقافة والترفيه.
+- دعم الحقوق أو التوعية بها أو المناصرة قد يفعّل مستشار الحقوق والمناصرة.
+- منظومة تطوع مادية ومتكررة تفعّل مستشار دعم العمل الخيري والتطوعي من زاوية التطوع وبناء القدرة، وليس من زاوية تصميم الشراكات.
+- لا ترفع مستشارًا قطاعيًا بسبب كلمة عابرة فقط.
+- لا تستخدم عدد المستشارين المطلوب كعامل في الدرجة.
+
+حدود التخصص:
+- لا تنسب للمستشار مخرجًا لا يملكه في ROUTING_CARD.
+- إذا كان السبب وظيفيًا بحتًا وليس قطاعيًا، خفّض الدرجة.
+
+قواعد اللغة:
+- حقل REASON عربي فقط.
+- ممنوع أي حروف إنجليزية أو روسية أو صينية أو يابانية أو كورية أو يونانية داخل REASON.
+- SYSTEM_CODE يبقى كما هو لأنه رمز تقني.
+- استخدم المصطلحات العربية بدل الكلمات الأجنبية.
+
+صيغة الإخراج الإلزامية:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|REASON
+
+تعليمات الإخراج:
+- أخرج سطرًا واحدًا لكل ROUTING_CARD، بنفس عدد البطاقات تمامًا.
+- SCORE رقم من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط، من 1 إلى 4 معرفات عند وجود دليل.
+- إذا كانت الدرجة أقل من 50 ومافيش دليل مباشر، يمكن كتابة NONE في EVIDENCE_IDS.
+- REASON يشرح سبب الدرجة باختصار وبدون اختلاق.
+- للمستشارين بدرجة 50 أو أكثر: السبب من 25 إلى 50 كلمة عربية ويذكر الوقائع والمساهمة المحددة.
+- للمستشارين أقل من 50: يكفي سبب عربي قصير.
+- ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+def _v25_cards(advisors, advisor_class, compact=False):
+    cards = []
+
+    for advisor in advisors:
+        advisor_num = int(advisor.get("advisor_id"))
+        current_class = "SECTOR" if advisor_num >= 26 else "FUNCTIONAL"
+
+        if current_class != advisor_class:
+            continue
+
+        if compact:
+            card = {
+                "system_code": advisor.get("system_code"),
+                "advisor_name": advisor.get(
+                    "name_ar",
+                    advisor.get("name_en"),
+                ),
+                "owned_outcome": advisor.get("owned_outcome"),
+                "owns": (advisor.get("owns") or [])[:5],
+                "activation_when": (advisor.get("activation_when") or [])[:5],
+                "not_primary_when": (advisor.get("not_primary_when") or [])[:2],
+            }
+        else:
+            card = {
+                "system_code": advisor.get("system_code"),
+                "advisor_name": advisor.get(
+                    "name_ar",
+                    advisor.get("name_en"),
+                ),
+                "mission": advisor.get("mission"),
+                "owned_outcome": advisor.get("owned_outcome"),
+                "owns": (advisor.get("owns") or [])[:7],
+                "activation_when": (advisor.get("activation_when") or [])[:7],
+                "not_primary_when": (advisor.get("not_primary_when") or [])[:4],
+                "boundaries": (advisor.get("boundaries") or [])[:3],
+            }
+
+        cards.append(card)
+
+    return cards
+
+
+def _v25_parse_scores(text, expected_codes, valid_fact_ids):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    rows = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 3)
+        if len(parts) != 4:
+            continue
+
+        code_raw, score_raw, evidence_raw, reason_raw = [
+            p.strip() for p in parts
+        ]
+
+        code = code_raw.strip()
+        if code not in expected_codes or code in rows:
+            continue
+
+        m = re.search(r"\d+(?:\.\d+)?", score_raw)
+        if not m:
+            continue
+
+        score = float(m.group())
+        if score <= 1:
+            score *= 100
+
+        score = max(0.0, min(100.0, score))
+
+        evidence_ids = []
+        if evidence_raw.upper() != "NONE":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if (
+                    token in valid_fact_ids
+                    and token not in evidence_ids
+                ):
+                    evidence_ids.append(token)
+
+        evidence_ids = evidence_ids[:4]
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        if not reason:
+            reason = "لا توجد ملاءمة كافية مدعومة بالوقائع الحالية."
+
+        rows[code] = {
+            "advisor_id": code,
+            "score": round(score / 100.0, 4),
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+
+    return rows
+
+
+def _v25_score_pass(
+    prompt,
+    facts,
+    advisors,
+    advisor_class,
+    valid_fact_ids,
+):
+    cards = _v25_cards(
+        advisors,
+        advisor_class,
+        compact=False,
+    )
+
+    expected_codes = {
+        card["system_code"]
+        for card in cards
+        if card.get("system_code")
+    }
+
+    try:
+        raw, tokens = _v18_generate_text(
+            prompt,
+            {
+                "facts": facts,
+                "routing_cards": cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+    except ValueError as exc:
+        if "input too long" not in str(exc).lower():
+            raise
+
+        print(
+            f"Rich v25 {advisor_class}: retrying with compact cards...",
+            flush=True,
+        )
+
+        cards = _v25_cards(
+            advisors,
+            advisor_class,
+            compact=True,
+        )
+
+        expected_codes = {
+            card["system_code"]
+            for card in cards
+            if card.get("system_code")
+        }
+
+        raw, tokens = _v18_generate_text(
+            prompt,
+            {
+                "facts": facts,
+                "routing_cards": cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+    parsed = _v25_parse_scores(
+        raw,
+        expected_codes,
+        valid_fact_ids,
+    )
+
+    missing_codes = expected_codes - set(parsed.keys())
+
+    if missing_codes:
+        print(
+            f"Rich v25 warning: {advisor_class} model omitted "
+            f"{len(missing_codes)} advisor score rows: "
+            f"{sorted(missing_codes)}",
+            flush=True,
+        )
+
+    return parsed, raw, tokens, expected_codes
+
+
+def advisory_match_rich_v25(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v25 pass A: scoring every FUNCTIONAL advisor 1-25...",
+        flush=True,
+    )
+
+    functional_scores, _, _, functional_codes = _v25_score_pass(
+        RICH_V25_FUNCTIONAL_PROMPT,
+        facts,
+        advisors,
+        "FUNCTIONAL",
+        valid_fact_ids,
+    )
+
+    print(
+        "Rich v25 pass B: scoring every SECTOR advisor 26-35...",
+        flush=True,
+    )
+
+    sector_scores, _, _, sector_codes = _v25_score_pass(
+        RICH_V25_SECTOR_PROMPT,
+        facts,
+        advisors,
+        "SECTOR",
+        valid_fact_ids,
+    )
+
+    all_scores = {}
+    all_scores.update(functional_scores)
+    all_scores.update(sector_scores)
+
+    expected_all = functional_codes | sector_codes
+    missing_all = expected_all - set(all_scores.keys())
+
+    # Missing model rows are treated as unscored/0, never as eligible.
+    for code in missing_all:
+        all_scores[code] = {
+            "advisor_id": code,
+            "score": 0.0,
+            "evidence_ids": [],
+            "reason": "لم يقدم النموذج تقييمًا صالحًا لهذا المستشار في هذه الجولة.",
+        }
+
+    matches = [
+        item
+        for item in all_scores.values()
+        if (
+            item["score"] >= RICH_V25_MIN_PUBLIC_SCORE
+            and item.get("evidence_ids")
+        )
+    ]
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    # Enforce Arabic-only public reasons.
+    matches = _v21_repair_reasons(matches)
+
+    print(
+        f"Rich v25 scored {len(expected_all)} advisors; "
+        f"returning {len(matches)} with score >= "
+        f"{RICH_V25_MIN_PUBLIC_SCORE:.2f} and grounded evidence.",
+        flush=True,
+    )
+
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -6954,7 +7368,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v24(
+        return advisory_match_rich_v25(
             job_input
         )
 

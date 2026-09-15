@@ -5429,6 +5429,570 @@ def advisory_match_rich_v25(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v26 — calibrated 0.50 threshold
+#
+# Problem fixed:
+# v25 correctly scored all 35 advisors, but the model used 0.50 as a
+# "maybe / possible" floor, which produced many false positives.
+#
+# v26 keeps the user's exact business rule:
+#   return every advisor whose FINAL score >= 0.50
+#
+# But score semantics are calibrated:
+#   >= 0.50 means there is grounded, current, material relevance.
+#   "possible / maybe / no clear evidence" MUST remain below 0.50.
+#
+# Functional advisors get a strict second-pass adjudication because they
+# require an actual need/decision/gap, not merely the existence of a domain.
+# Sector advisors may qualify from a material recurring sector portfolio.
+# Arabic-only reasons remain enforced.
+# ---------------------------------------------------------------------
+
+RICH_V26_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V26_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V26_FUNCTIONAL_PROMPT = """
+أنت محرك تقييم صارم لملاءمة المستشارين الوظيفيين في منظومة أثر.
+
+لديك:
+FACTS = وقائع موثقة عن الجمعية وبرامجها.
+ROUTING_CARDS = بطاقات المستشارين الوظيفيين.
+
+قيّم كل مستشار موجود في ROUTING_CARDS بلا استثناء.
+لا يجوز حذف أي مستشار من التقييم.
+
+المعنى الدقيق للدرجة:
+- 90-100: احتياج أو قرار محوري ومثبت يملكه المستشار مباشرة.
+- 80-89: احتياج مباشر قوي ومدعوم بأكثر من واقعة.
+- 70-79: مساهمة وظيفية مادية وواضحة ومطلوبة الآن.
+- 60-69: ملاءمة حقيقية ومثبتة لكن أقل مركزية.
+- 50-59: توجد واقعة محددة تثبت حاجة فعلية لخدمة هذا المستشار الآن.
+- 40-49: احتمال منطقي أو فرصة محتملة لكن الدليل غير كافٍ للترشيح.
+- 20-39: صلة عامة بالمجال فقط.
+- 0-19: غير مرتبط بالحالة الحالية.
+
+قاعدة حاسمة:
+الدرجة 50 ليست "ربما".
+لكي يحصل المستشار الوظيفي على 50 أو أكثر يجب أن توجد واقعة محددة في FACTS تحقق شرط تفعيل حقيقي لهذا المستشار.
+
+إذا كان تقييمك يتضمن أي معنى من الآتي:
+- "حاجة محتملة"
+- "قد يحتاج"
+- "قد يشير"
+- "ربما"
+- "لا توجد أدلة واضحة"
+- "مع أن الجمعية لديها..."
+- "لمجرد وجود برامج أو موظفين أو أموال أو بيانات"
+فلا يجوز أن تكون الدرجة 50 أو أكثر، ويجب أن تكون 49 أو أقل.
+
+قواعد منع الإيجابيات الكاذبة:
+- وجود حوكمة مرتفعة لا يفعّل مستشار الحوكمة، بل يخفض الحاجة إليه ما لم توجد فجوة حوكمة موثقة أو قرار حوكمي جديد.
+- وجود رؤية ورسالة واضحة لا يفعّل مستشار الهوية.
+- وجود أهداف استراتيجية واضحة لا يفعّل مستشار القضايا والأهداف إلا إذا توجد مشكلة أو إعادة صياغة أو تعارض أو مراجعة موثقة.
+- وجود استراتيجية لا يفعّل مستشار التخطيط الاستراتيجي دون قرار استراتيجي أو مفاضلة أو تحديث حقيقي.
+- وجود مؤشرات وأرقام لا يفعّل مستشار المؤشرات دون حاجة موثقة لبناء أو إصلاح منظومة قياس أداء.
+- وجود بيانات لا يفعّل مستشار المتابعة والتقييم دون حاجة موثقة لقياس نتائج أو أثر أو تقييم.
+- وجود برامج كثيرة لا يفعّل مستشار تصميم المبادرات إلا إذا كان هناك تصميم أو إعادة تصميم تدخل.
+- وجود أموال لا يفعّل المستشار المالي دون موازنة أو سيولة أو تكلفة أو انحراف أو قرار مالي.
+- وجود تمويل لا يفعّل تنمية الموارد دون فجوة تمويل أو تنويع موارد أو مانحين أو استدامة مالية موثقة.
+- وجود موظفين لا يفعّل الموارد البشرية دون هيكل أو عبء أو أدوار أو مهارات أو أداء أو قوى عاملة تحتاج معالجة.
+- وجود عمليات لا يفعّل مستشار العمليات دون تأخير أو هدر أو أخطاء أو إعادة تصميم أو أتمتة عملية موثقة.
+- وجود قنوات تواصل لا يفعّل الاتصال المؤسسي دون مشكلة أو هدف اتصالي موثق.
+- وجود حضور رقمي لا يفعّل التسويق الرقمي دون حملة أو تحويل أو اكتساب مطلوب.
+- وجود تقنية لا يفعّل التحول الرقمي دون مشكلة رقمية أو أتمتة أو نظام أو تكامل أو حالة استخدام موثقة.
+
+قواعد التفعيل الإيجابي:
+- تعدد البرامج والمسارات بشكل مادي قد يفعّل مستشار المحافظ والبرامج والمشاريع عندما توجد حاجة فعلية للتنسيق أو الأولويات أو الترابط أو إدارة المحفظة.
+- التشغيل الدوري أو الموسمي أو متعدد الجهات والموارد قد يفعّل مستشار التخطيط التشغيلي.
+- شبكة شراكات جوهرية يعتمد عليها التنفيذ قد تفعّل مستشار أصحاب المصلحة والشراكات.
+- قرار توسع أو تغيير أو استثمار أو إعادة تنظيم موثق يمكن أن يفعّل المستشار المختص به حسب ملكيته الفعلية.
+
+حدود التخصص:
+- لا تنسب للمستشار عملاً يخص مستشارًا آخر.
+- إذا كان السبب الحقيقي يصف تخصص مستشار آخر، خفض الدرجة.
+- لا تستخدم عدد المستشارين المطلوب كعامل في الدرجة.
+- لا تخترع فجوة غير موجودة.
+
+اللغة:
+- REASON عربي فقط.
+- SYSTEM_CODE يبقى كما هو.
+- لا تستخدم أي حروف أجنبية داخل REASON.
+
+الإخراج الإلزامي:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|ACTIVATION|REASON
+
+تعليمات:
+- سطر واحد لكل ROUTING_CARD بلا استثناء.
+- SCORE من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط، من 1 إلى 4 معرفات، أو NONE.
+- ACTIVATION جملة عربية قصيرة تحدد الواقعة التي فعّلت المستشار، أو "لا يوجد تفعيل كافٍ".
+- REASON يشرح الدرجة دون اختلاق.
+- إذا SCORE >= 50 فيجب أن تكون ACTIVATION واقعة محددة وليست احتمالًا.
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+RICH_V26_SECTOR_PROMPT = """
+أنت محرك تقييم صارم لملاءمة المستشارين القطاعيين في منظومة أثر.
+
+قيّم كل مستشار موجود في ROUTING_CARDS بلا استثناء.
+
+المعنى الدقيق للدرجة:
+- 90-100: القطاع جوهري جدًا ومتكرر في رسالة الجمعية ومحفظة خدماتها.
+- 80-89: قطاع رئيسي وله عدة برامج أو خدمات واضحة.
+- 70-79: قطاع مادي ومهم في عمل الجمعية.
+- 60-69: صلة قطاعية حقيقية وواضحة لكن أقل مركزية.
+- 50-59: صلة قطاعية فعلية ومثبتة وليست مجرد ذكر عابر.
+- 40-49: نشاط محدود أو عابر أو غير كافٍ للترشيح.
+- أقل من 40: غير مادي للحالة الحالية.
+
+قاعدة حاسمة:
+50 أو أكثر يعني أن القطاع حاضر فعليًا في رسالة الجمعية أو أهدافها أو عدة برامج أو خدمة جوهرية.
+مجرد فعالية واحدة أو كلمة واحدة لا تكفي.
+
+أمثلة:
+- برامج صحية متكررة ورعاية صحية فعلية قد تفعّل مستشار الصحة.
+- خدمات رعاية اجتماعية مستمرة قد تفعّل مستشار الخدمات الاجتماعية.
+- برامج ثقافية وترفيهية متكررة قد تفعّل مستشار الثقافة والترفيه.
+- هدف بحثي صريح أو برامج تعليمية مادية قد تفعّل مستشار التعليم والبحث.
+- منظومة تطوع جوهرية ومتكررة قد تفعّل مستشار دعم العمل الخيري والتطوعي من زاوية التطوع وبناء القدرة.
+- حقوق الفئة أو التوعية بالحقوق أو المناصرة كهدف فعلي قد تفعّل مستشار الحقوق والمناصرة.
+- لا تستخدم الشراكات وحدها سببًا لتفعيل مستشار التطوع إذا لم يوجد تطوع مادي.
+
+لا تستخدم عدد المستشارين المطلوب كعامل في الدرجة.
+لا تخترع نشاطًا أو قطاعًا غير موجود.
+
+اللغة:
+- REASON عربي فقط.
+- SYSTEM_CODE يبقى كما هو.
+- لا تستخدم أي حروف أجنبية داخل REASON.
+
+الإخراج الإلزامي:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|ACTIVATION|REASON
+
+تعليمات:
+- سطر واحد لكل ROUTING_CARD بلا استثناء.
+- SCORE من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط، أو NONE.
+- ACTIVATION جملة عربية قصيرة تحدد النشاط أو الهدف القطاعي المثبت، أو "لا يوجد تفعيل كافٍ".
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+RICH_V26_FUNCTIONAL_REVIEW_PROMPT = """
+أنت مراجع نهائي صارم لدرجات المستشارين الوظيفيين.
+
+ستستلم:
+FACTS
+CANDIDATES
+ROUTING_CARDS
+
+كل مرشح في CANDIDATES حصل مبدئيًا على 50 أو أكثر.
+راجعهم من جديد بصورة مستقلة.
+
+الغرض من هذه الجولة هو منع استخدام 50 كدرجة "ربما".
+
+اختبار الاحتفاظ:
+احتفظ بدرجة 50 أو أكثر فقط إذا:
+1) توجد واقعة موثقة ومحددة في FACTS.
+2) الواقعة تحقق شرط تفعيل حقيقي للمستشار.
+3) المساهمة المطلوبة تقع داخل ملكية المستشار.
+4) السبب لا يعتمد على افتراض فجوة غير مذكورة.
+5) مجرد وجود مجال ناجح أو قائم لا يعتبر احتياجًا استشاريًا.
+
+قواعد خفض إلزامية:
+- إذا كان السبب يقول أو يعني "حاجة محتملة"، "قد يحتاج"، "لا توجد أدلة واضحة"، "ربما"، أو يستنتج فجوة من مجرد وجود النشاط: اجعل الدرجة 49 أو أقل.
+- إذا كانت الحوكمة مرتفعة ولا توجد فجوة موثقة: الحوكمة أقل من 50.
+- إذا كانت الهوية واضحة ولا توجد مراجعة هوية: الهوية أقل من 50.
+- إذا لا توجد مراجعة استراتيجية أو مفاضلة استراتيجية موثقة: التخطيط الاستراتيجي أقل من 50.
+- إذا لا توجد حاجة موثقة لموازنة أو سيولة أو تكلفة أو انحراف: المالي أقل من 50.
+- إذا لا توجد حاجة موثقة لتنمية الموارد أو تنويع الدخل: الاستدامة المالية وتنمية الموارد أقل من 50.
+- إذا لا توجد حاجة موثقة للهيكل أو القوى العاملة أو الأدوار أو المهارات: الموارد البشرية أقل من 50.
+- إذا لا توجد مشكلة عملية أو إعادة تصميم أو تحسين موثقة: العمليات أقل من 50.
+- إذا لا توجد مشكلة أو هدف رقمي موثق: التحول الرقمي أقل من 50.
+- إذا لا توجد حملة أو تحويل أو اكتساب موثق: التسويق الرقمي أقل من 50.
+
+لا تخفض مستشارًا صحيحًا فقط لتقليل العدد.
+لا يوجد حد أقصى لعدد النتائج.
+الحد الوحيد هو الدليل والملاءمة.
+
+أخرج لكل مرشح:
+SYSTEM_CODE|FINAL_SCORE|EVIDENCE_IDS|REASON
+
+- FINAL_SCORE من 0 إلى 100.
+- REASON عربي فقط.
+- لا تضف أي مستشار غير موجود في CANDIDATES.
+- ممنوع JSON وMarkdown.
+"""
+
+
+def _v26_parse_scores(text, expected_codes, valid_fact_ids):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    rows = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+
+        code_raw, score_raw, evidence_raw, activation_raw, reason_raw = [
+            p.strip() for p in parts
+        ]
+
+        code = code_raw.strip()
+        if code not in expected_codes or code in rows:
+            continue
+
+        m = re.search(r"\d+(?:\.\d+)?", score_raw)
+        if not m:
+            continue
+
+        score = float(m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        evidence_ids = []
+        if evidence_raw.upper() != "NONE":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+
+        activation = re.sub(r"\s+", " ", activation_raw).strip()
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        rows[code] = {
+            "advisor_id": code,
+            "score": round(score / 100.0, 4),
+            "evidence_ids": evidence_ids[:4],
+            "activation": activation,
+            "reason": reason or "لا توجد ملاءمة كافية مدعومة بالوقائع الحالية.",
+        }
+
+    return rows
+
+
+def _v26_score_pass(prompt, facts, advisors, advisor_class, valid_fact_ids):
+    cards = _v25_cards(advisors, advisor_class, compact=False)
+
+    expected_codes = {
+        card["system_code"]
+        for card in cards
+        if card.get("system_code")
+    }
+
+    try:
+        raw, tokens = _v18_generate_text(
+            prompt,
+            {
+                "facts": facts,
+                "routing_cards": cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+    except ValueError as exc:
+        if "input too long" not in str(exc).lower():
+            raise
+
+        cards = _v25_cards(advisors, advisor_class, compact=True)
+        expected_codes = {
+            card["system_code"]
+            for card in cards
+            if card.get("system_code")
+        }
+
+        raw, tokens = _v18_generate_text(
+            prompt,
+            {
+                "facts": facts,
+                "routing_cards": cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+    parsed = _v26_parse_scores(
+        raw,
+        expected_codes,
+        valid_fact_ids,
+    )
+
+    missing = expected_codes - set(parsed.keys())
+    for code in missing:
+        parsed[code] = {
+            "advisor_id": code,
+            "score": 0.0,
+            "evidence_ids": [],
+            "activation": "لا يوجد تقييم صالح.",
+            "reason": "لم يقدم النموذج تقييمًا صالحًا لهذا المستشار في هذه الجولة.",
+        }
+
+    return parsed, cards
+
+
+def _v26_parse_review(text, expected_codes, valid_fact_ids):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    reviewed = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 3)
+        if len(parts) != 4:
+            continue
+
+        code_raw, score_raw, evidence_raw, reason_raw = [
+            p.strip() for p in parts
+        ]
+
+        code = code_raw.strip()
+        if code not in expected_codes or code in reviewed:
+            continue
+
+        m = re.search(r"\d+(?:\.\d+)?", score_raw)
+        if not m:
+            continue
+
+        score = float(m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        evidence_ids = []
+        if evidence_raw.upper() != "NONE":
+            for token in re.split(r"[,،;\s]+", evidence_raw):
+                token = token.strip().upper()
+                if token in valid_fact_ids and token not in evidence_ids:
+                    evidence_ids.append(token)
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        reviewed[code] = {
+            "advisor_id": code,
+            "score": round(score / 100.0, 4),
+            "evidence_ids": evidence_ids[:4],
+            "reason": reason or "لا توجد ملاءمة كافية مدعومة بالوقائع الحالية.",
+        }
+
+    return reviewed
+
+
+def _v26_review_functional_candidates(
+    facts,
+    initial_scores,
+    functional_cards,
+    valid_fact_ids,
+):
+    candidates = [
+        {
+            "advisor_id": item["advisor_id"],
+            "initial_score": item["score"],
+            "evidence_ids": item.get("evidence_ids", []),
+            "activation": item.get("activation", ""),
+            "reason": item.get("reason", ""),
+        }
+        for item in initial_scores.values()
+        if item["score"] >= RICH_V26_MIN_PUBLIC_SCORE
+    ]
+
+    if not candidates:
+        return {}
+
+    candidate_codes = {
+        item["advisor_id"]
+        for item in candidates
+    }
+
+    relevant_cards = [
+        card
+        for card in functional_cards
+        if card.get("system_code") in candidate_codes
+    ]
+
+    raw, _ = _v18_generate_text(
+        RICH_V26_FUNCTIONAL_REVIEW_PROMPT,
+        {
+            "facts": facts,
+            "candidates": candidates,
+            "routing_cards": relevant_cards,
+        },
+        RICH_V18_MATCH_MAX_NEW_TOKENS,
+    )
+
+    reviewed = _v26_parse_review(
+        raw,
+        candidate_codes,
+        valid_fact_ids,
+    )
+
+    # If reviewer omitted a candidate, keep initial score only if the
+    # initial activation/evidence is usable; otherwise demote safely.
+    for code in candidate_codes:
+        if code in reviewed:
+            continue
+
+        initial = initial_scores[code]
+        activation = str(initial.get("activation", "")).strip()
+
+        weak_markers = (
+            "لا توجد",
+            "محتمل",
+            "قد ",
+            "ربما",
+            "لا يوجد",
+        )
+
+        if (
+            not initial.get("evidence_ids")
+            or any(marker in activation for marker in weak_markers)
+        ):
+            fallback_score = 0.49
+        else:
+            fallback_score = initial["score"]
+
+        reviewed[code] = {
+            "advisor_id": code,
+            "score": fallback_score,
+            "evidence_ids": initial.get("evidence_ids", []),
+            "reason": initial.get("reason", ""),
+        }
+
+    return reviewed
+
+
+def advisory_match_rich_v26(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v26 pass A: calibrated scoring for all 25 FUNCTIONAL advisors...",
+        flush=True,
+    )
+
+    functional_scores, functional_cards = _v26_score_pass(
+        RICH_V26_FUNCTIONAL_PROMPT,
+        facts,
+        advisors,
+        "FUNCTIONAL",
+        valid_fact_ids,
+    )
+
+    print(
+        "Rich v26 pass B: calibrated scoring for all 10 SECTOR advisors...",
+        flush=True,
+    )
+
+    sector_scores, _ = _v26_score_pass(
+        RICH_V26_SECTOR_PROMPT,
+        facts,
+        advisors,
+        "SECTOR",
+        valid_fact_ids,
+    )
+
+    print(
+        "Rich v26 pass C: strict review of functional candidates >= 0.50...",
+        flush=True,
+    )
+
+    reviewed_functional = _v26_review_functional_candidates(
+        facts,
+        functional_scores,
+        functional_cards,
+        valid_fact_ids,
+    )
+
+    # Functional: use reviewed score for initial candidates; all other
+    # functional advisors stay below threshold according to pass A.
+    final_scores = {}
+
+    for code, item in functional_scores.items():
+        if code in reviewed_functional:
+            final_scores[code] = reviewed_functional[code]
+        else:
+            final_scores[code] = {
+                "advisor_id": code,
+                "score": item["score"],
+                "evidence_ids": item.get("evidence_ids", []),
+                "reason": item.get("reason", ""),
+            }
+
+    # Sector: initial calibrated score is final.
+    for code, item in sector_scores.items():
+        final_scores[code] = {
+            "advisor_id": code,
+            "score": item["score"],
+            "evidence_ids": item.get("evidence_ids", []),
+            "reason": item.get("reason", ""),
+        }
+
+    matches = [
+        item
+        for item in final_scores.values()
+        if (
+            item["score"] >= RICH_V26_MIN_PUBLIC_SCORE
+            and item.get("evidence_ids")
+        )
+    ]
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    matches = _v21_repair_reasons(matches)
+
+    print(
+        f"Rich v26 returning {len(matches)} advisors with "
+        f"final calibrated score >= {RICH_V26_MIN_PUBLIC_SCORE:.2f}.",
+        flush=True,
+    )
+
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -7368,7 +7932,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v25(
+        return advisory_match_rich_v26(
             job_input
         )
 

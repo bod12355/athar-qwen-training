@@ -9415,6 +9415,841 @@ def advisory_match_rich_v31(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v32 — ONE-PASS production router
+#
+# Root fix:
+# - Do NOT ask Qwen to compare all 35 verbose advisor DNAs.
+# - Do NOT do 35 forward passes.
+# - Do NOT generate Arabic reasons.
+#
+# Pipeline:
+#   A) Python creates HIGH-RECALL candidates from explicit evidence only.
+#   B) ONE Qwen generation adjudicates only those candidates.
+#   C) Python validates returned evidence IDs.
+#   D) Python writes concise clean Arabic reasons deterministically.
+#
+# Normal path = ONE model generation.
+# Final threshold remains score >= 0.50.
+# ---------------------------------------------------------------------
+
+RICH_V32_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V32_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V32_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V32_MAX_NEW_TOKENS", "320")
+)
+
+# Functional activation vocabulary is intentionally narrow.
+# Mere existence of a domain is not enough.
+_V32_FUNCTIONAL_TERMS = {
+    1: (
+        "قرار تنفيذي", "أولوية تنفيذية", "أولويات تنفيذية",
+        "إعادة تنظيم", "إعادة هيكلة", "توسع مؤسسي", "نمو مؤسسي",
+        "قيادة تنفيذية",
+    ),
+    2: (
+        "نضج مؤسسي", "تشخيص مؤسسي", "تقييم مؤسسي",
+        "جاهزية مؤسسية", "خط أساس مؤسسي", "فجوة مؤسسية",
+        "قدرات مؤسسية",
+    ),
+    3: (
+        "تحليل داخلي", "تحليل خارجي", "فرص وتهديدات",
+        "فرص", "تهديدات", "اتجاهات السوق", "اتجاهات المجتمع",
+        "عوامل خارجية", "عوامل داخلية",
+    ),
+    4: (
+        "شراكة", "شراكات", "شريك", "شركاء",
+        "أصحاب المصلحة", "بالتعاون مع",
+    ),
+    5: (
+        "تحول مؤسسي", "تغيير مؤسسي", "إعادة هيكلة",
+        "إعادة تنظيم", "إدارة التغيير", "مقاومة التغيير",
+        "تبني التغيير",
+    ),
+    6: (
+        "جودة الخدمة", "جودة الخدمات", "معايير الجودة",
+        "رضا المستفيد", "رضا المستفيدين", "شكاوى",
+        "عدم مطابقة", "تميز مؤسسي",
+    ),
+    7: (
+        "مخاطر", "خطر", "استمرارية الأعمال", "استمرارية",
+        "طوارئ", "أزمة", "أزمات", "تعطل",
+    ),
+    8: (
+        "مراجعة استراتيجية", "تحديث الاستراتيجية",
+        "تحديث الخطة الاستراتيجية", "مفاضلة استراتيجية",
+        "خيارات استراتيجية", "توجه استراتيجي جديد",
+    ),
+    9: (
+        "تطوير الرؤية", "تحديث الرؤية", "تطوير الرسالة",
+        "تحديث الرسالة", "إعادة صياغة الرؤية",
+        "إعادة صياغة الرسالة", "تطوير الهوية",
+    ),
+    10: (
+        "قضايا استراتيجية", "إعادة صياغة الأهداف",
+        "تطوير الأهداف الاستراتيجية", "ترتيب الأولويات الاستراتيجية",
+        "تعارض الأهداف",
+    ),
+    11: (
+        "مبادرة جديدة", "برنامج جديد", "مشروع جديد",
+        "تصميم مبادرة", "تصميم برنامج", "إعادة تصميم",
+        "مبادرات مستقبلية", "مشروعات مستقبلية",
+    ),
+    12: (
+        "أسبوعي", "أسبوعية", "يومي", "يومية", "دوري", "دورية",
+        "موسمي", "موسمية", "رمضان", "تشغيل", "جدول",
+        "مواعيد", "خطة تشغيلية",
+    ),
+    13: (
+        "محفظة", "برامج متعددة", "مبادرات متعددة",
+        "مشاريع متعددة", "مسارات", "برامج ومشاريع",
+    ),
+    14: (
+        "مؤشرات أداء", "مؤشر أداء", "لوحة قيادة",
+        "لوحة مؤشرات", "مستهدفات أداء", "منظومة الأداء",
+        "قياس الأداء",
+    ),
+    15: (
+        "قياس الأثر", "إدارة الأثر", "تقييم الأثر",
+        "متابعة وتقييم", "تقييم النتائج", "نظرية التغيير",
+        "التعلم المؤسسي",
+    ),
+    16: (
+        "فجوة حوكمة", "تحسين الحوكمة", "امتثال",
+        "مخالفة", "صلاحيات", "تعارض مصالح",
+        "سياسة حوكمة", "لائحة حوكمة",
+    ),
+    17: (
+        "موازنة", "ميزانية", "تكلفة", "تكاليف",
+        "سيولة", "تدفق نقدي", "انحراف مالي",
+        "إعادة تخصيص مالي", "مصروفات", "إيرادات",
+    ),
+    18: (
+        "استدامة مالية", "تنمية الموارد", "تنويع الإيرادات",
+        "فجوة تمويل", "جمع التبرعات", "تبرعات",
+        "مانحين", "مانح", "منح", "مصادر دخل",
+    ),
+    19: (
+        "وقف", "أوقاف", "استثمار اجتماعي",
+        "استثمار مؤثر", "سياسة استثمار", "أصل استثماري",
+    ),
+    20: (
+        "هيكل تنظيمي", "إعادة هيكلة", "موظفين", "موظف",
+        "قوى عاملة", "عبء العمل", "جدارات",
+        "توظيف", "أدوار وظيفية", "أداء الموظفين",
+    ),
+    21: (
+        "إجراءات", "إجراء", "عملية", "عمليات",
+        "اختناق", "تأخير", "هدر", "إعادة عمل",
+        "تحسين العمليات", "رحلة الخدمة",
+    ),
+    22: (
+        "استراتيجية اتصال", "اتصال مؤسسي", "سمعة",
+        "علاقات عامة", "صورة ذهنية", "رسائل",
+        "أزمة اتصال", "إعلام",
+    ),
+    23: (
+        "تسويق رقمي", "حملة رقمية", "حملات رقمية",
+        "إعلانات", "اكتساب", "تحويل", "إعادة استهداف",
+    ),
+    24: (
+        "تحول رقمي", "ذكاء اصطناعي", "أتمتة",
+        "تكامل الأنظمة", "رقمنة", "منصة رقمية",
+        "نظام رقمي", "حالة استخدام",
+    ),
+    25: (
+        "حوكمة البيانات", "جودة البيانات", "قاموس بيانات",
+        "مصدر الحقيقة", "إدارة المعرفة", "أرشيف",
+        "سجلات", "تقارير", "ملكية البيانات",
+    ),
+}
+
+_V32_SECTOR_TERMS = {
+    26: (
+        "ثقافي", "ثقافية", "ثقافة", "ترفيهي", "ترفيهية",
+        "تراث", "تراثي", "فنون", "ديوانية",
+    ),
+    27: (
+        "تعليم", "تعليمي", "تعليمية", "تدريب",
+        "بحث", "بحوث", "دراسة", "دراسات",
+        "قدوات", "نقل المعرفة", "تبادل الخبرات",
+    ),
+    28: (
+        "صحة", "صحي", "صحية", "مستشفى", "علاج",
+        "علاجي", "فحوصات", "وقاية", "تغذية",
+        "العلاج الطبيعي",
+    ),
+    29: (
+        "رعاية اجتماعية", "خدمات اجتماعية", "اجتماعي",
+        "اجتماعية", "كبار السن", "جودة الحياة",
+        "تمكين اجتماعي", "دعم اجتماعي",
+    ),
+    30: (
+        "بيئة", "بيئي", "بيئية", "تشجير", "نفايات",
+        "إعادة تدوير", "مناخ", "تنوع حيوي",
+    ),
+    31: (
+        "إسكان", "سكن", "سكني", "ترميم",
+        "إيجار", "منازل", "تنمية محلية", "سبل العيش",
+    ),
+    32: (
+        "حقوق", "حق كبار السن", "مناصرة",
+        "دعم قانوني", "قانوني", "توعية بالحقوق",
+    ),
+    33: (
+        "تطوع", "تطوعي", "تطوعية", "متطوع",
+        "متطوعين", "فرص تطوعية", "بناء قدرات",
+    ),
+    34: (
+        "دعوة", "دعوي", "ديني", "دينية",
+        "ضيوف الرحمن", "حجاج", "معتمرين",
+        "عمرة", "تعليم ديني",
+    ),
+    35: (
+        "جمعية مهنية", "رابطة مهنية", "عضوية مهنية",
+        "أعضاء مهنيين", "تطوير مهني", "لجان مهنية",
+    ),
+}
+
+# Advisors whose activation is directly supported by computed structural facts.
+_V32_STRUCTURAL_FACTS = {
+    4: ("C3",),
+    12: ("C2",),
+    13: ("C1",),
+    33: ("C4",),
+}
+
+
+def _v32_fact_text(fact):
+    return _v31_norm_ar(fact.get("text", ""))
+
+
+def _v32_match_fact_ids(facts, terms):
+    matched = []
+
+    normalized_terms = [
+        _v31_norm_ar(term)
+        for term in terms
+        if term
+    ]
+
+    for fact in facts:
+        fid = fact.get("fact_id")
+
+        # Name/type facts are never sufficient routing evidence.
+        if fid in {"O1", "O2"}:
+            continue
+
+        text = _v32_fact_text(fact)
+
+        if any(term in text for term in normalized_terms):
+            matched.append(fid)
+
+    return matched
+
+
+def _v32_candidate_evidence(advisor_num, facts):
+    evidence = []
+
+    for fid in _V32_STRUCTURAL_FACTS.get(advisor_num, ()):
+        if any(f.get("fact_id") == fid for f in facts):
+            evidence.append(fid)
+
+    if advisor_num <= 25:
+        terms = _V32_FUNCTIONAL_TERMS.get(advisor_num, ())
+    else:
+        terms = _V32_SECTOR_TERMS.get(advisor_num, ())
+
+    for fid in _v32_match_fact_ids(facts, terms):
+        if fid not in evidence:
+            evidence.append(fid)
+
+    return evidence
+
+
+def _v32_candidate_allowed(advisor_num, evidence_ids, fact_map, program_count):
+    """
+    Hard activation boundary.
+    This does NOT choose the advisor; it only prevents impossible candidates.
+    """
+
+    if not evidence_ids:
+        return False
+
+    texts = " ".join(
+        fact_map[fid]["text"]
+        for fid in evidence_ids
+        if fid in fact_map
+    )
+
+    norm = _v31_norm_ar(texts)
+
+    # Structural advisors.
+    if advisor_num == 4:
+        return "C3" in evidence_ids or _v30_contains_any(
+            norm, ("شراكة", "شراكات", "شريك", "شركاء")
+        )
+
+    if advisor_num == 12:
+        return "C2" in evidence_ids
+
+    if advisor_num == 13:
+        return "C1" in evidence_ids and program_count >= 4
+
+    if advisor_num == 33:
+        return "C4" in evidence_ids
+
+    # Functional advisors need explicit specialist activation.
+    if advisor_num <= 25:
+        # Governance: high governance achievement alone is not a need.
+        if advisor_num == 16:
+            need_terms = (
+                "فجوة", "تحسين", "امتثال", "مخالفة",
+                "صلاحيات", "تعارض", "سياسة", "لائحة",
+            )
+            return _v30_contains_any(norm, need_terms)
+
+        # Finance requires a real finance concept, not "program funding".
+        if advisor_num == 17:
+            return _v30_contains_any(
+                norm,
+                (
+                    "موازنة", "ميزانية", "تكلفة", "سيولة",
+                    "تدفق نقدي", "انحراف مالي",
+                    "مصروفات", "ايرادات",
+                ),
+            )
+
+        # HR cannot be activated by volunteers alone.
+        if advisor_num == 20:
+            return _v30_contains_any(
+                norm,
+                (
+                    "هيكل تنظيمي", "موظف", "موظفين",
+                    "قوى عاملة", "عبء العمل", "جدارات",
+                    "توظيف", "ادوار وظيفية",
+                ),
+            )
+
+        # Operations requires process language; cadence belongs to SP-12.
+        if advisor_num == 21:
+            return _v30_contains_any(
+                norm,
+                (
+                    "اجراء", "اجراءات", "عملية", "عمليات",
+                    "اختناق", "تاخير", "هدر", "اعادة عمل",
+                    "تحسين العمليات", "رحلة الخدمة",
+                ),
+            )
+
+        # KPI/data/impact require explicit system/measurement intent.
+        if advisor_num == 14:
+            return _v30_contains_any(
+                norm,
+                (
+                    "مؤشرات اداء", "لوحة مؤشرات",
+                    "لوحة قيادة", "قياس الاداء",
+                    "مستهدفات اداء", "منظومة الاداء",
+                ),
+            )
+
+        if advisor_num == 15:
+            return _v30_contains_any(
+                norm,
+                (
+                    "قياس الاثر", "تقييم الاثر",
+                    "متابعة وتقييم", "تقييم النتائج",
+                    "نظرية التغيير", "التعلم المؤسسي",
+                ),
+            )
+
+        if advisor_num == 25:
+            return _v30_contains_any(
+                norm,
+                (
+                    "حوكمة البيانات", "جودة البيانات",
+                    "قاموس بيانات", "مصدر الحقيقة",
+                    "ادارة المعرفة", "ملكية البيانات",
+                ),
+            )
+
+        # For the remaining functional advisors, at least one explicit
+        # activation phrase from the narrow vocabulary is already required.
+        return True
+
+    # Sector boundaries.
+    if advisor_num == 34:
+        # Ramadan/Quranic social activities alone do not make the NGO
+        # a religious-da'wah portfolio.
+        return _v30_contains_any(
+            norm,
+            (
+                "دعوة", "دعوي", "تعليم ديني",
+                "ضيوف الرحمن", "حجاج", "معتمرين", "عمرة",
+            ),
+        )
+
+    if advisor_num == 35:
+        return _v30_contains_any(
+            norm,
+            ("جمعية مهنية", "رابطة مهنية", "عضوية مهنية"),
+        )
+
+    # Sector advisors should have material evidence:
+    # one explicit organizational/goal fact OR at least two evidence facts.
+    org_goal_evidence = any(
+        fid.startswith(("O", "N"))
+        for fid in evidence_ids
+    )
+
+    return org_goal_evidence or len(evidence_ids) >= 2
+
+
+def _v32_compact_fact(fact):
+    fid = fact["fact_id"]
+    text = _v30_arabic_public_text(
+        _v30_trim(fact.get("text"), 260)
+    )
+    return {
+        "fact_id": fid,
+        "text": text,
+    }
+
+
+def _v32_build_candidates(advisors, facts):
+    fact_map = {
+        f["fact_id"]: f
+        for f in facts
+    }
+
+    program_count = sum(
+        1
+        for f in facts
+        if str(f.get("fact_id", "")).startswith("P")
+    )
+
+    candidates = []
+
+    for advisor in advisors:
+        num = int(advisor["advisor_id"])
+        evidence_ids = _v32_candidate_evidence(
+            num,
+            facts,
+        )
+
+        if not _v32_candidate_allowed(
+            num,
+            evidence_ids,
+            fact_map,
+            program_count,
+        ):
+            continue
+
+        # Keep a small evidence set to minimize prompt length.
+        structural = [
+            fid for fid in evidence_ids
+            if fid.startswith("C")
+        ]
+        ordinary = [
+            fid for fid in evidence_ids
+            if not fid.startswith("C")
+        ]
+
+        selected_ids = (
+            structural[:2]
+            + ordinary[:4]
+        )[:5]
+
+        candidate_facts = [
+            _v32_compact_fact(fact_map[fid])
+            for fid in selected_ids
+            if fid in fact_map
+        ]
+
+        candidates.append({
+            "advisor_id": advisor["system_code"],
+            "advisor_name": advisor.get("name_ar"),
+            "advisor_class": (
+                "SECTOR"
+                if num >= 26
+                else "FUNCTIONAL"
+            ),
+            "owned_outcome": _v30_arabic_public_text(
+                _v30_trim(
+                    advisor.get("owned_outcome"),
+                    220,
+                )
+            ),
+            "activation_when": [
+                _v30_arabic_public_text(
+                    _v30_trim(x, 115)
+                )
+                for x in (
+                    advisor.get("activation_when") or []
+                )[:4]
+            ],
+            "evidence": candidate_facts,
+        })
+
+    return candidates
+
+
+RICH_V32_ADJUDICATOR_PROMPT = """
+أنت الحكم النهائي السريع لملاءمة مجموعة مرشحين استشاريين في منظومة أثر.
+
+مهم:
+Python أجرى قبل هذه الجولة فحصًا أوليًا للأدلة وحدود التخصص.
+أمامك الآن فقط مرشحون لديهم دليل محتمل.
+مهمتك أن تمنح كل مرشح درجة نهائية دقيقة.
+
+معنى الدرجات:
+90-100 = ارتباط مباشر ومحوري جدًا.
+80-89 = ارتباط مباشر وقوي.
+70-79 = ارتباط واضح ومادي.
+60-69 = ارتباط حقيقي لكنه أقل مركزية.
+50-59 = ارتباط حقيقي مثبت لكنه محدود نسبيًا.
+أقل من 50 = الدليل لا يكفي للترشيح النهائي.
+
+للمستشار FUNCTIONAL:
+لا تمنح 50 أو أكثر إلا إذا كانت الأدلة تثبت حاجة أو قرارًا أو تعقيدًا حاليًا يقع داخل OWNED_OUTCOME.
+مجرد وجود المجال أو وجود برامج لا يكفي.
+غياب معلومة لا يعتبر حاجة.
+لا تخترع فجوة غير مذكورة.
+
+للمستشار SECTOR:
+يمكن أن يحصل على 50 أو أكثر إذا كانت الأدلة تثبت أن القطاع حاضر بصورة جوهرية أو متكررة في أهداف الجمعية أو برامجها، حتى دون وجود مشكلة.
+
+قواعد:
+- قيّم كل CANDIDATE بلا استثناء.
+- لا تستخدم عددًا مستهدفًا للمستشارين.
+- لا ترفع مستشارًا لأن تخصصه مفيد عمومًا.
+- استخدم فقط EVIDENCE المرفقة بكل مرشح.
+- إذا كان الدليل يخص مستشارًا آخر بصورة أوضح، اجعل الدرجة أقل من 50.
+
+الإخراج فقط:
+ADVISOR_ID|SCORE|EVIDENCE_IDS
+
+مثال شكلي:
+AOS-SP-13|82|C1,P3
+
+- SCORE من 0 إلى 100.
+- إذا SCORE >= 50 يجب ذكر من 1 إلى 3 معرفات من EVIDENCE الخاصة بنفس المرشح.
+- إذا SCORE < 50 اكتب NONE.
+- ممنوع الأسباب.
+- ممنوع JSON.
+- ممنوع Markdown.
+- ممنوع أي شرح إضافي.
+"""
+
+
+def _v32_parse_results(text, candidates):
+    candidate_map = {
+        c["advisor_id"]: c
+        for c in candidates
+    }
+
+    rows = {}
+
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 2)
+
+        if len(parts) != 3:
+            continue
+
+        code = parts[0].strip()
+
+        if (
+            code not in candidate_map
+            or code in rows
+        ):
+            continue
+
+        score_text = _v30_digits_to_ascii(
+            parts[1]
+        )
+
+        m = re.search(
+            r"\d+(?:\.\d+)?",
+            score_text,
+        )
+
+        if not m:
+            continue
+
+        score = float(m.group())
+
+        if score <= 1:
+            score *= 100
+
+        score = max(
+            0.0,
+            min(100.0, score),
+        )
+
+        allowed_ids = {
+            e["fact_id"]
+            for e in candidate_map[code]["evidence"]
+        }
+
+        returned_ids = []
+
+        for token in re.findall(
+            r"\b(?:O|N|P|C)\d+\b",
+            _v30_digits_to_ascii(
+                parts[2]
+            ).upper(),
+        ):
+            if (
+                token in allowed_ids
+                and token not in returned_ids
+            ):
+                returned_ids.append(token)
+
+        rows[code] = {
+            "advisor_id": code,
+            "score": round(
+                score / 100.0,
+                4,
+            ),
+            "evidence_ids": returned_ids[:3],
+        }
+
+    return rows
+
+
+def _v32_program_name(text):
+    m = re.search(
+        r'(?:برنامج|مشروع)\s+"([^"]+)"',
+        str(text),
+    )
+
+    if m:
+        return _v30_arabic_public_text(
+            m.group(1)
+        )
+
+    return ""
+
+
+def _v32_evidence_label(fid, fact_map):
+    fact = fact_map.get(fid)
+
+    if not fact:
+        return ""
+
+    if fid == "C1":
+        return "تعدد البرامج والمشاريع وتنوع مجالاتها"
+
+    if fid == "C2":
+        return "وجود برامج دورية وموسمية ومتكررة تحتاج إلى تنسيق تشغيلي"
+
+    if fid == "C3":
+        return "اعتماد تنفيذ عدد من البرامج على الشراكات والتعاون مع جهات متعددة"
+
+    if fid == "C4":
+        return "وجود منظومة تطوع فعلية تشمل متطوعين وفرصًا تطوعية"
+
+    if fid.startswith("P"):
+        name = _v32_program_name(
+            fact.get("text")
+        )
+
+        if name:
+            return f"برنامج «{name}»"
+
+    source = _v30_arabic_public_text(
+        fact.get("source") or ""
+    )
+
+    if source:
+        return source
+
+    return _v31_safe_cut(
+        fact.get("text"),
+        100,
+    )
+
+
+def _v32_reason(advisor, evidence_ids, fact_map):
+    name = _v30_arabic_public_text(
+        advisor.get("name_ar")
+        or "المستشار"
+    )
+
+    labels = []
+
+    for fid in evidence_ids:
+        label = _v32_evidence_label(
+            fid,
+            fact_map,
+        )
+
+        if (
+            label
+            and label not in labels
+        ):
+            labels.append(label)
+
+    labels = labels[:2]
+
+    num = int(
+        advisor["advisor_id"]
+    )
+
+    if not labels:
+        return (
+            f"ترتبط خبرة {name} باحتياج موثق في بيانات الجمعية "
+            "ويقع هذا الاحتياج مباشرة ضمن نطاق اختصاصه."
+        )
+
+    if len(labels) == 1:
+        evidence_phrase = labels[0]
+    else:
+        evidence_phrase = (
+            labels[0]
+            + "، إلى جانب "
+            + labels[1]
+        )
+
+    if num >= 26:
+        reason = (
+            f"يرتبط {name} بالجمعية استنادًا إلى {evidence_phrase}. "
+            "وتثبت هذه الأدلة حضور هذا القطاع بصورة فعلية في أنشطة الجمعية، "
+            "مما يجعل خبرة المستشار مرتبطة مباشرة بالمحفظة الحالية."
+        )
+    else:
+        reason = (
+            f"يرتبط {name} بالجمعية استنادًا إلى {evidence_phrase}. "
+            "وتثبت هذه الأدلة وجود حاجة أو تعقيد حالي يقع مباشرة ضمن نطاق اختصاصه، "
+            "دون افتراض فجوات غير مذكورة في البيانات."
+        )
+
+    return _v30_arabic_public_text(
+        reason
+    )
+
+
+def advisory_match_rich_v32(job_input):
+    started = time.time()
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = _v31_build_facts(
+        organization,
+        programs,
+    )
+
+    fact_map = {
+        fact["fact_id"]: fact
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    advisor_by_code = {
+        advisor["system_code"]: advisor
+        for advisor in advisors
+    }
+
+    candidates = _v32_build_candidates(
+        advisors,
+        facts,
+    )
+
+    print(
+        f"Rich v32: {len(candidates)} evidence-backed candidates "
+        "from 35 advisors; running ONE adjudication generation...",
+        flush=True,
+    )
+
+    if not candidates:
+        return {"ranked": []}
+
+    raw, input_tokens = _v18_generate_text(
+        RICH_V32_ADJUDICATOR_PROMPT,
+        {
+            "candidates": candidates,
+        },
+        RICH_V32_MAX_NEW_TOKENS,
+    )
+
+    rows = _v32_parse_results(
+        raw,
+        candidates,
+    )
+
+    matches = []
+
+    for candidate in candidates:
+        code = candidate["advisor_id"]
+        item = rows.get(code)
+
+        if not item:
+            continue
+
+        if item["score"] < RICH_V32_MIN_PUBLIC_SCORE:
+            continue
+
+        if not item.get("evidence_ids"):
+            continue
+
+        advisor = advisor_by_code.get(code)
+
+        if not advisor:
+            continue
+
+        matches.append({
+            "advisor_id": code,
+            "score": item["score"],
+            "reason": _v32_reason(
+                advisor,
+                item["evidence_ids"],
+                fact_map,
+            ),
+        })
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    elapsed = round(
+        time.time() - started,
+        2,
+    )
+
+    print(
+        f"Rich v32 complete in {elapsed}s. "
+        f"Input tokens={input_tokens}. "
+        f"Candidates={len(candidates)}. "
+        f"Returned={len(matches)}. "
+        "Model generations=1.",
+        flush=True,
+    )
+
+    return {
+        "ranked": matches
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -11346,7 +12181,7 @@ def handler(job):
 
             return {
                 "status": "advisory_match_preflight_ok",
-                "routing_engine": "rich_ai_v31_zero_generation_classifier",
+                "routing_engine": "rich_ai_v32_one_pass_production",
                 "model": MATCHER_BASE_MODEL,
                 "registry_path": RICH_REGISTRY_PATH,
                 "advisor_count": len(
@@ -11354,7 +12189,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v31(
+        return advisory_match_rich_v32(
             job_input
         )
 

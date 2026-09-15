@@ -11141,6 +11141,430 @@ def advisory_match_rich_v33(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v34 — final one-pass production hardening
+#
+# Keeps the successful v33 architecture:
+#   - ONE Qwen generation
+#   - score threshold >= 0.50
+#   - deterministic Arabic reasons
+#
+# Final hardening:
+#   1) Re-validates the exact evidence for every returned advisor.
+#   2) Uses the strongest advisor-specific evidence for public reasons,
+#      instead of trusting whichever evidence IDs the LLM happened to cite.
+#   3) Tightens false-positive-prone sector boundaries (environment,
+#      development/housing, rights, religion, professional associations).
+#   4) Extracts the exact relevant Arabic clause from broad organization
+#      facts, so reasons do not show truncated generic text.
+# ---------------------------------------------------------------------
+
+RICH_V34_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V34_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V34_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V34_MAX_NEW_TOKENS", "240")
+)
+
+
+def _v34_terms_for_advisor(advisor_num):
+    if advisor_num <= 25:
+        return _V33_FUNCTIONAL_TERMS.get(advisor_num, ())
+    return _V33_SECTOR_TERMS.get(advisor_num, ())
+
+
+def _v34_direct_fact_match(advisor_num, fact):
+    fid = str(fact.get("fact_id", ""))
+    text = _v31_norm_ar(fact.get("text", ""))
+
+    # Structural facts are intentionally advisor-specific.
+    structural = {
+        4: "C3",
+        12: "C2",
+        13: "C1",
+        33: "C4",
+    }
+
+    if structural.get(advisor_num) == fid:
+        return True
+
+    # Hard boundaries for the most false-positive-prone sectors.
+    if advisor_num == 30:
+        return _v30_contains_any(
+            text,
+            (
+                "بيئي", "بيئية", "استدامة بيئية",
+                "تشجير", "نفايات", "اعادة تدوير",
+                "تلوث", "مناخ", "تنوع حيوي",
+                "اقتصاد دائري",
+            ),
+        )
+
+    if advisor_num == 31:
+        return _v30_contains_any(
+            text,
+            (
+                "اسكان", "سكن", "سكني", "سكنية",
+                "ترميم منزل", "ترميم المنازل",
+                "ايجار سكن", "منازل",
+                "تنمية محلية", "تنمية مجتمعية",
+                "سبل العيش", "تمكين اقتصادي",
+            ),
+        )
+
+    if advisor_num == 32:
+        return _v30_contains_any(
+            text,
+            (
+                "حقوق كبار السن", "حقوق المستفيدين",
+                "توعية بالحقوق", "دعم الحقوق",
+                "مناصرة", "دعم قانوني",
+                "خدمة قانونية", "حماية الحقوق",
+            ),
+        )
+
+    if advisor_num == 34:
+        return _v30_contains_any(
+            text,
+            (
+                "دعوة", "دعوي", "تعليم ديني",
+                "ضيوف الرحمن", "حجاج",
+                "معتمرين", "عمرة",
+            ),
+        )
+
+    if advisor_num == 35:
+        return _v30_contains_any(
+            text,
+            (
+                "جمعية مهنية", "رابطة مهنية",
+                "عضوية مهنية", "اعضاء مهنيين",
+                "تطوير مهني", "لجان مهنية",
+            ),
+        )
+
+    terms = _v34_terms_for_advisor(advisor_num)
+    return bool(_v33_term_hits(text, terms))
+
+
+def _v34_verified_evidence(advisor, candidate, fact_map):
+    advisor_num = int(advisor["advisor_id"])
+    terms = _v34_terms_for_advisor(advisor_num)
+
+    valid = []
+
+    for evidence in candidate.get("evidence", []):
+        fid = evidence.get("fact_id")
+        fact = fact_map.get(fid)
+
+        if not fact:
+            continue
+
+        if not _v34_direct_fact_match(
+            advisor_num,
+            fact,
+        ):
+            continue
+
+        priority = _v33_fact_priority(
+            advisor_num,
+            fact,
+            terms,
+        )
+
+        valid.append(
+            (priority, fid)
+        )
+
+    valid.sort(
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    return [
+        fid
+        for _, fid in valid[:3]
+    ]
+
+
+def _v34_matching_clause(advisor_num, text):
+    clean = _v30_arabic_public_text(text)
+    if not clean:
+        return ""
+
+    terms = [
+        _v31_norm_ar(term)
+        for term in _v34_terms_for_advisor(advisor_num)
+        if term
+    ]
+
+    # Add strict sector phrases that may not be in the broad vocabulary.
+    if advisor_num == 31:
+        terms.extend([
+            "اسكان", "سكن", "ترميم", "ايجار",
+            "تنمية محلية", "تنمية مجتمعية",
+            "سبل العيش", "تمكين اقتصادي",
+        ])
+    elif advisor_num == 32:
+        terms.extend([
+            "حقوق كبار السن", "توعية بالحقوق",
+            "دعم الحقوق", "مناصرة", "قانوني",
+        ])
+
+    # Split broad organization facts into meaningful clauses and return
+    # the clause that actually contains the advisor-specific evidence.
+    clauses = re.split(
+        r"[؛.!؟\n]|،(?=\s)",
+        clean,
+    )
+
+    for clause in clauses:
+        clause = re.sub(r"\s+", " ", clause).strip()
+        if len(clause) < 8:
+            continue
+
+        norm_clause = _v31_norm_ar(clause)
+
+        if any(term in norm_clause for term in terms):
+            return _v31_safe_cut(
+                clause,
+                145,
+            )
+
+    return _v31_safe_cut(
+        clean,
+        135,
+    )
+
+
+def _v34_evidence_label(advisor_num, fid, fact_map):
+    fact = fact_map.get(fid)
+    if not fact:
+        return ""
+
+    if fid == "C1":
+        return "تعدد البرامج والمشاريع وتنوع مجالاتها"
+
+    if fid == "C2":
+        return "وجود برامج دورية وموسمية ومتكررة تحتاج إلى تنسيق تشغيلي"
+
+    if fid == "C3":
+        return "اعتماد تنفيذ عدد من البرامج على الشراكات والتعاون مع جهات متعددة"
+
+    if fid == "C4":
+        return "وجود منظومة تطوع فعلية تشمل متطوعين وفرصًا تطوعية"
+
+    if fid.startswith("P"):
+        pname = _v32_program_name(
+            fact.get("text")
+        )
+        if pname:
+            return f"برنامج «{pname}»"
+
+    return _v34_matching_clause(
+        advisor_num,
+        fact.get("text", ""),
+    )
+
+
+def _v34_reason(advisor, evidence_ids, fact_map):
+    advisor_num = int(advisor["advisor_id"])
+
+    name = _v30_arabic_public_text(
+        advisor.get("name_ar")
+        or "المستشار"
+    )
+
+    labels = []
+
+    for fid in evidence_ids:
+        label = _v34_evidence_label(
+            advisor_num,
+            fid,
+            fact_map,
+        )
+
+        if (
+            label
+            and label not in labels
+        ):
+            labels.append(label)
+
+        if len(labels) == 2:
+            break
+
+    if not labels:
+        return (
+            f"يرتبط {name} باحتياج موثق في بيانات الجمعية "
+            "ويقع هذا الاحتياج مباشرة ضمن نطاق اختصاصه."
+        )
+
+    evidence_phrase = labels[0]
+
+    if len(labels) == 2:
+        evidence_phrase += "، إلى جانب " + labels[1]
+
+    if advisor_num >= 26:
+        reason = (
+            f"يرتبط {name} بالجمعية استنادًا إلى {evidence_phrase}. "
+            "وتثبت هذه الوقائع حضور هذا القطاع بصورة فعلية ومادية في عمل الجمعية، "
+            "مما يجعل خبرة المستشار مرتبطة مباشرة بالمحفظة الحالية."
+        )
+    else:
+        reason = (
+            f"يرتبط {name} بالجمعية استنادًا إلى {evidence_phrase}. "
+            "وتثبت هذه الوقائع وجود حاجة أو تعقيد حالي يقع مباشرة ضمن نطاق اختصاصه، "
+            "دون افتراض فجوات غير مذكورة في البيانات."
+        )
+
+    return _v30_arabic_public_text(
+        reason
+    )
+
+
+def advisory_match_rich_v34(job_input):
+    started = time.time()
+
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = _v31_build_facts(
+        organization,
+        programs,
+    )
+
+    fact_map = {
+        fact["fact_id"]: fact
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    advisor_by_code = {
+        advisor["system_code"]: advisor
+        for advisor in advisors
+    }
+
+    candidates = _v33_build_candidates(
+        advisors,
+        facts,
+    )
+
+    print(
+        f"Rich v34: {len(candidates)} strictly evidence-backed candidates "
+        "from 35 advisors; running ONE adjudication generation...",
+        flush=True,
+    )
+
+    if not candidates:
+        return {"ranked": []}
+
+    raw, input_tokens = _v18_generate_text(
+        RICH_V33_ADJUDICATOR_PROMPT,
+        {
+            "candidates": candidates,
+        },
+        RICH_V34_MAX_NEW_TOKENS,
+    )
+
+    rows = _v32_parse_results(
+        raw,
+        candidates,
+    )
+
+    matches = []
+
+    for candidate in candidates:
+        code = candidate["advisor_id"]
+        item = rows.get(code)
+
+        ai_score = (
+            item["score"]
+            if item
+            else 0.0
+        )
+
+        strength = candidate.get(
+            "evidence_strength",
+            "MEDIUM",
+        )
+
+        evidence_floor = (
+            0.60
+            if strength == "STRONG"
+            else 0.0
+        )
+
+        final_score = max(
+            ai_score,
+            evidence_floor,
+        )
+
+        if final_score < RICH_V34_MIN_PUBLIC_SCORE:
+            continue
+
+        advisor = advisor_by_code.get(code)
+        if not advisor:
+            continue
+
+        # Critical v34 change:
+        # public evidence is re-validated deterministically against the
+        # exact advisor domain. We do not trust an unrelated evidence ID
+        # merely because the LLM returned it.
+        verified_ids = _v34_verified_evidence(
+            advisor,
+            candidate,
+            fact_map,
+        )
+
+        if not verified_ids:
+            print(
+                f"Rich v34 evidence verification dropped {code}.",
+                flush=True,
+            )
+            continue
+
+        matches.append({
+            "advisor_id": code,
+            "score": round(
+                final_score,
+                4,
+            ),
+            "reason": _v34_reason(
+                advisor,
+                verified_ids,
+                fact_map,
+            ),
+        })
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    elapsed = round(
+        time.time() - started,
+        2,
+    )
+
+    print(
+        f"Rich v34 complete in {elapsed}s. "
+        f"Input tokens={input_tokens}. "
+        f"Candidates={len(candidates)}. "
+        f"Returned={len(matches)}. "
+        "Model generations=1.",
+        flush=True,
+    )
+
+    return {
+        "ranked": matches
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -13072,7 +13496,7 @@ def handler(job):
 
             return {
                 "status": "advisory_match_preflight_ok",
-                "routing_engine": "rich_ai_v33_calibrated_one_pass",
+                "routing_engine": "rich_ai_v34_final_one_pass",
                 "model": MATCHER_BASE_MODEL,
                 "registry_path": RICH_REGISTRY_PATH,
                 "advisor_count": len(
@@ -13080,7 +13504,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v33(
+        return advisory_match_rich_v34(
             job_input
         )
 

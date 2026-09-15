@@ -3468,8 +3468,15 @@ SCORE:
 80-89 = DIRECT/COMPLEMENTARY قوي
 70-79 = COMPLEMENTARY واضح
 55-69 = RELEVANT_OPTION مادي
-40-54 = RELEVANT_OPTION أضعف لكنه حقيقي
-أقل من 40 لا تخرجه
+50-54 = RELEVANT_OPTION حقيقي لكنه أقل مركزية
+أقل من 50 لا تخرجه
+
+قاعدة إخراج إلزامية:
+- قيّم كل ROUTING_CARD أمام جميع VALIDATED_THEMES.
+- أخرج كل مستشار حصل على SCORE يساوي 50 أو أكثر.
+- لا تسقط مستشارًا مناسبًا لمجرد وجود مستشار أعلى منه.
+- لا يوجد حد أقصى لعدد المستشارين.
+- لا تخرج أي مستشار أقل من 50.
 
 REASON:
 - 30 إلى 55 كلمة عربية.
@@ -3858,7 +3865,7 @@ def _parse_v18_matches(
             min(100.0, score),
         )
 
-        if score < 40:
+        if score < 50:
             continue
 
         theme_ids = []
@@ -4693,6 +4700,319 @@ def advisory_match_rich_v22(job_input):
     return advisory_match_rich_v21(
         job_input
     )
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v23 — split functional/sector adjudication
+#
+# Why:
+# - With 35 advisors in one global matching pass, sector advisors can
+#   dominate attention and suppress genuine functional advisors.
+# - v23 discovers/validates themes once, then runs TWO independent
+#   matching passes:
+#       1) FUNCTIONAL advisors 1-25
+#       2) SECTOR advisors 26-35
+# - No minimum-count expansion is used. The pool emerges from evidence.
+# - Arabic-only public reasons from v21 remain enforced.
+# ---------------------------------------------------------------------
+
+RICH_V23_THEME_PROMPT = RICH_V18_THEME_PROMPT + """
+
+فحص تغطية إلزامي قبل إخراج الثيمات:
+راجع FACTS كلها ثم افحص بصورة مستقلة ما إذا كان يوجد دليل مادي على كل بُعد من الأبعاد التالية:
+1) تعقيد المحفظة: كثرة البرامج/المبادرات وتعدد المسارات والحاجة إلى ترتيب أو تنسيق المحفظة.
+2) التعقيد التشغيلي: برامج دورية أو موسمية أو متعددة الجهات والموارد والمواعيد.
+3) الشراكات: اعتماد مادي على شبكة شركاء لتنفيذ خدمات متعددة أو توسيع القيمة المتبادلة.
+4) التطوع: قاعدة متطوعين وفرص تطوعية جوهرية ومتكررة.
+5) القطاعات الجوهرية: صحة، خدمات اجتماعية، تعليم/بحث، ثقافة/ترفيه، حقوق، بيئة، إسكان، دعوة/ضيوف الرحمن، أو جمعية مهنية.
+6) أي قرار توسع أو تغيير أو استدامة مثبت في الوقائع.
+
+لا تُخرج بُعدًا بلا دليل، لكن لا تسقط بُعدًا ماديًا فقط لأن ثيمًا قطاعيًا آخر يبدو أوضح.
+المطلوب جميع الثيمات المستقلة الحقيقية، وليس أهم عدد محدود منها.
+"""
+
+
+def _v23_routing_cards(advisors, advisor_class, detailed=True):
+    cards = []
+
+    for advisor in advisors:
+        advisor_num = int(advisor.get("advisor_id"))
+        current_class = "SECTOR" if advisor_num >= 26 else "FUNCTIONAL"
+
+        if current_class != advisor_class:
+            continue
+
+        if detailed:
+            card = {
+                "system_code": advisor.get("system_code"),
+                "advisor_name": advisor.get(
+                    "name_ar",
+                    advisor.get("name_en"),
+                ),
+                "advisor_class": current_class,
+                "mission": advisor.get("mission"),
+                "owned_outcome": advisor.get("owned_outcome"),
+                "owns": (advisor.get("owns") or [])[:8],
+                "activation_when": (advisor.get("activation_when") or [])[:8],
+                "not_primary_when": (advisor.get("not_primary_when") or [])[:4],
+                "boundaries": (advisor.get("boundaries") or [])[:3],
+            }
+        else:
+            card = {
+                "system_code": advisor.get("system_code"),
+                "advisor_name": advisor.get(
+                    "name_ar",
+                    advisor.get("name_en"),
+                ),
+                "advisor_class": current_class,
+                "owned_outcome": advisor.get("owned_outcome"),
+                "owns": (advisor.get("owns") or [])[:5],
+                "activation_when": (advisor.get("activation_when") or [])[:5],
+                "not_primary_when": (advisor.get("not_primary_when") or [])[:2],
+            }
+
+        cards.append(card)
+
+    return cards
+
+
+RICH_V23_FUNCTIONAL_MATCH_PROMPT = RICH_V18_MATCH_PROMPT + """
+
+هذه الجولة مخصصة للمستشارين الوظيفيين FUNCTIONAL فقط.
+لا تتوقع وجود المستشارين القطاعيين في ROUTING_CARDS ولا تعاقب المستشار الوظيفي بسبب غيابهم.
+قيّم كل بطاقة وظيفية أمام جميع VALIDATED_THEMES ذات الصلة.
+
+تذكير مهم:
+- تعقيد محفظة كبيرة قد يفعّل مستشار المحافظ والبرامج والمشاريع.
+- التشغيل المتكرر والمتعدد المسارات قد يفعّل مستشار التخطيط التشغيلي.
+- شبكة شراكات يعتمد عليها التنفيذ قد تفعّل مستشار أصحاب المصلحة والشراكات.
+- لا تفعّل الهوية أو الحوكمة أو المؤشرات أو الاستراتيجية لمجرد أن هذه الأشياء موجودة بالفعل.
+"""
+
+RICH_V23_SECTOR_MATCH_PROMPT = RICH_V18_MATCH_PROMPT + """
+
+هذه الجولة مخصصة للمستشارين القطاعيين SECTOR فقط.
+لا تتوقع وجود المستشارين الوظيفيين في ROUTING_CARDS.
+قيّم كل مستشار قطاعي فقط إذا كان القطاع جوهريًا ومتكررًا في رسالة الجمعية أو أهدافها أو محفظة برامجها.
+
+لا تُضعف مستشارًا قطاعيًا فقط لأن هناك مستشارًا وظيفيًا قد يغطي جانب التنفيذ؛ المستشار القطاعي يضيف الذكاء الفني للقطاع نفسه.
+"""
+
+
+def _v23_match_pass(
+    system_prompt,
+    facts,
+    validated_themes,
+    advisors,
+    advisor_class,
+    valid_fact_ids,
+):
+    detailed_cards = _v23_routing_cards(
+        advisors,
+        advisor_class,
+        detailed=True,
+    )
+
+    valid_codes = {
+        card["system_code"]
+        for card in detailed_cards
+        if card.get("system_code")
+    }
+
+    valid_theme_ids = {
+        theme["theme_id"]
+        for theme in validated_themes
+    }
+
+    payload = {
+        "facts": facts,
+        "validated_themes": validated_themes,
+        "routing_cards": detailed_cards,
+    }
+
+    try:
+        raw, tokens = _v18_generate_text(
+            system_prompt,
+            payload,
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+    except ValueError as exc:
+        if "input too long" not in str(exc).lower():
+            raise
+
+        print(
+            f"Rich v23 {advisor_class} pass exceeded token budget; "
+            "retrying with compact routing cards...",
+            flush=True,
+        )
+
+        compact_cards = _v23_routing_cards(
+            advisors,
+            advisor_class,
+            detailed=False,
+        )
+
+        valid_codes = {
+            card["system_code"]
+            for card in compact_cards
+            if card.get("system_code")
+        }
+
+        raw, tokens = _v18_generate_text(
+            system_prompt,
+            {
+                "facts": facts,
+                "validated_themes": validated_themes,
+                "routing_cards": compact_cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+    matches = _parse_v18_matches(
+        raw,
+        valid_codes,
+        valid_theme_ids,
+        valid_fact_ids,
+    )
+
+    return matches, raw, tokens
+
+
+RICH_V24_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V24_MIN_PUBLIC_SCORE", "0.50")
+)
+
+def advisory_match_rich_v24(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        f["fact_id"]
+        for f in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v24 pass 1: discovering all grounded advisory themes...",
+        flush=True,
+    )
+
+    themes_raw, themes_tokens = _v18_generate_text(
+        RICH_V23_THEME_PROMPT,
+        {"facts": facts},
+        RICH_V18_THEME_MAX_NEW_TOKENS,
+    )
+
+    candidate_themes = _parse_v18_themes(
+        themes_raw,
+        valid_fact_ids,
+    )
+
+    print(
+        f"Rich v24 pass 2: validating {len(candidate_themes)} themes...",
+        flush=True,
+    )
+
+    if candidate_themes:
+        review_raw, review_tokens = _v18_generate_text(
+            RICH_V18_THEME_REVIEW_PROMPT,
+            {
+                "facts": facts,
+                "candidate_themes": candidate_themes,
+            },
+            RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS,
+        )
+
+        validated_themes, theme_decisions = _parse_v18_theme_review(
+            review_raw,
+            candidate_themes,
+            valid_fact_ids,
+        )
+    else:
+        validated_themes = []
+
+    if not validated_themes:
+        return {"ranked": []}
+
+    print(
+        f"Rich v24 pass 3A: matching 25 FUNCTIONAL advisors to "
+        f"{len(validated_themes)} validated themes...",
+        flush=True,
+    )
+
+    functional_matches, _, _ = _v23_match_pass(
+        RICH_V23_FUNCTIONAL_MATCH_PROMPT,
+        facts,
+        validated_themes,
+        advisors,
+        "FUNCTIONAL",
+        valid_fact_ids,
+    )
+
+    print(
+        f"Rich v24 pass 3B: matching 10 SECTOR advisors to "
+        f"{len(validated_themes)} validated themes...",
+        flush=True,
+    )
+
+    sector_matches, _, _ = _v23_match_pass(
+        RICH_V23_SECTOR_MATCH_PROMPT,
+        facts,
+        validated_themes,
+        advisors,
+        "SECTOR",
+        valid_fact_ids,
+    )
+
+    merged = {}
+    for item in functional_matches + sector_matches:
+        code = item["advisor_id"]
+
+        if (
+            code not in merged
+            or item["score"] > merged[code]["score"]
+        ):
+            merged[code] = item
+
+    matches = sorted(
+        [
+            item
+            for item in merged.values()
+            if item["score"] >= RICH_V24_MIN_PUBLIC_SCORE
+        ],
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    # Enforce Arabic-only public reasons.
+    matches = _v21_repair_reasons(matches)
+
+    print(
+        f"Rich v24 final grounded pool >= {RICH_V24_MIN_PUBLIC_SCORE:.2f}: {len(matches)} advisors "
+        f"({len(functional_matches)} functional + "
+        f"{len(sector_matches)} sector).",
+        flush=True,
+    )
+
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
 
 
 RUNS = {
@@ -6634,7 +6954,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v22(
+        return advisory_match_rich_v24(
             job_input
         )
 

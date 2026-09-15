@@ -6821,6 +6821,1858 @@ def advisory_match_rich_v28(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v29 — evidence-entailment verification
+#
+# Core design:
+# 1) Score every advisor first.
+# 2) Recover any advisor row omitted by the model.
+# 3) For every candidate >= 0.50, verify the ACTUAL cited fact text
+#    against that advisor's activation conditions and ownership.
+# 4) Functional and sector candidates are verified separately.
+# 5) Only VERIFIED KEEP + final score >= 0.50 is public.
+#
+# This prevents "absence = need" errors such as:
+# - high governance score -> governance advisor
+# - no documented budget issue -> finance advisor
+# - volunteers -> HR advisor
+# - programs exist -> operations/data/communications advisor
+# ---------------------------------------------------------------------
+
+RICH_V29_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V29_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V29_RECOVERY_PROMPT = """
+أنت محرك تقييم مستشار واحد أو عدة مستشارين لم يتم إخراج تقييمهم في الجولة السابقة.
+
+قيّم كل ROUTING_CARD بلا استثناء.
+استخدم FACTS فقط.
+لا تخترع أي فجوة أو مشكلة أو حاجة.
+
+أخرج:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|ACTIVATION|REASON
+
+SCORE من 0 إلى 100.
+EVIDENCE_IDS من FACTS فقط أو NONE.
+ACTIVATION واقعة تفعيل حقيقية أو "لا يوجد تفعيل كافٍ".
+REASON عربي فقط.
+
+قاعدة:
+50 أو أكثر يعني ملاءمة حالية حقيقية ومثبتة.
+"قد يحتاج" أو "ربما" أو "لا توجد أدلة" أو مجرد وجود المجال = أقل من 50.
+
+ممنوع JSON وMarkdown.
+"""
+
+RICH_V29_FUNCTIONAL_VERIFY_PROMPT = """
+أنت مراجع أدلة صارم للمستشارين الوظيفيين في منظومة أثر.
+
+ستستلم CANDIDATES.
+كل مرشح يحتوي على:
+- بطاقة المستشار.
+- الدرجة الأولية.
+- سبب التقييم الأولي.
+- واقعة التفعيل الأولية.
+- الأدلة النصية الفعلية المقتبسة من FACTS.
+
+مهمتك ليست البحث عن سبب جديد لإبقاء المستشار.
+مهمتك اختبار:
+هل الأدلة النصية الفعلية تثبت احتياجًا أو قرارًا أو تعقيدًا حاليًا يقع داخل ملكية هذا المستشار؟
+
+اختبار KEEP:
+KEEP فقط إذا تحققت الشروط الأربعة:
+1) الدليل إيجابي وموجود فعليًا، وليس غياب معلومة.
+2) الدليل يحقق شرط تفعيل للمستشار، وليس مجرد أن مجال المستشار موجود في الجمعية.
+3) المساهمة تقع داخل OWNERSHIP الحقيقي للمستشار.
+4) الملاءمة مادية بما يكفي للحصول على 50 أو أكثر الآن.
+
+اختبار DROP:
+DROP إذا كان الاستدلال من نوع:
+- لم يذكر وجود شيء، إذن نحتاج مستشارًا له.
+- لا توجد خطة/سياسة/تحليل، إذن نحتاج المستشار.
+- الجمعية لديها برامج، إذن تحتاج مالية/عمليات/بيانات/اتصال/موارد بشرية.
+- الجمعية لديها متطوعون، إذن تحتاج موارد بشرية.
+- الجمعية حققت حوكمة مرتفعة، إذن تحتاج حوكمة.
+- الجمعية لديها رسالة وهوية واضحة، إذن تحتاج هوية.
+- الجمعية لديها أهداف، إذن تحتاج قضايا وأهداف.
+- الجمعية لديها أرقام، إذن تحتاج مؤشرات أو بيانات.
+- الجمعية لديها تمويل، إذن تحتاج تنمية موارد.
+- مجرد "قد يكون مفيدًا" أو "حاجة محتملة".
+
+استثناءات مشروعة عندما يكون التعقيد نفسه واقعة تفعيل:
+- محفظة كبيرة ومتعددة المسارات يمكن أن تفعل مستشار المحافظ والبرامج والمشاريع.
+- تشغيل دوري/يومي/أسبوعي/موسمي متعدد الموارد أو الشركاء يمكن أن يفعل التخطيط التشغيلي.
+- اعتماد التنفيذ على شبكة شركاء متعددة يمكن أن يفعل أصحاب المصلحة والشراكات.
+- قرار توسع أو تحول أو إعادة تنظيم موثق يمكن أن يفعل المستشار المتخصص به.
+
+قواعد تخصصية صارمة:
+- المالية تحتاج دليلًا على موازنة/تكلفة/سيولة/تدفقات/انحراف/قرار مالي، لا مجرد مشروع أو برنامج.
+- تنمية الموارد تحتاج فجوة تمويل/تنويع دخل/مانحين/منح/اعتماد تمويلي، لا مجرد وجود شراكات.
+- الموارد البشرية تحتاج موظفين/هيكل/أدوار/عبء/قوى عاملة/جدارات/أداء، لا المتطوعين وحدهم.
+- العمليات تحتاج إجراء/تدفق/اختناق/تأخير/هدر/إعادة عمل/تحسين خدمة أو أتمتة عملية، لا مجرد وجود برامج.
+- البيانات تحتاج مشكلة جودة/ملكية/مصدر حقيقة/وصول/معرفة حرجة/تقارير، لا مجرد أرقام.
+- الاتصال يحتاج هدف أو مشكلة اتصال/سمعة/رسائل/جمهور، لا مجرد برامج.
+- الحوكمة تحتاج فجوة أو التزام أو صلاحيات أو سياسة أو قرار حوكمي. الإنجاز المرتفع ليس احتياجًا.
+- التحليل الداخلي والخارجي يحتاج قرارًا أو حاجة لتحليل البيئة، لا مجرد وجود شركاء وبرامج.
+- القيادة التنفيذية تحتاج قرارًا تنفيذيًا مؤسسيًا فعليًا يتجاوز ملكية المستشارين المتخصصين.
+
+أعد تقييم الدرجة:
+- KEEP: FINAL_SCORE من 50 إلى 100.
+- DROP: FINAL_SCORE من 0 إلى 49.
+
+السبب النهائي:
+- عربي مهني واضح.
+- لا تستخدم حروفًا أجنبية.
+- لا تخترع أي معلومة.
+- إذا KEEP، اذكر الواقعة التي تثبت التفعيل وما الذي سيضيفه المستشار تحديدًا.
+- إذا DROP، اذكر باختصار لماذا الأدلة لا تثبت احتياجًا حاليًا.
+
+الإخراج:
+SYSTEM_CODE|DECISION|FINAL_SCORE|REASON
+
+سطر لكل مرشح بلا استثناء.
+ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+RICH_V29_SECTOR_VERIFY_PROMPT = """
+أنت مراجع أدلة صارم للمستشارين القطاعيين في منظومة أثر.
+
+ستستلم مرشحين قطاعيين مع:
+- بطاقة المستشار.
+- الدرجة الأولية.
+- الأدلة النصية الفعلية.
+
+المستشار القطاعي لا يحتاج وجود "مشكلة".
+يمكن KEEP إذا كان القطاع نفسه جوهريًا ومتكررًا في:
+- رسالة الجمعية،
+- أهدافها الصريحة،
+- أو محفظة برامجها وخدماتها.
+
+KEEP إذا:
+1) توجد أكثر من إشارة مادية أو برنامج/هدف جوهري للقطاع، أو خدمة أساسية واضحة.
+2) الخبرة القطاعية للمستشار تضيف قيمة مباشرة للبرامج الحالية.
+3) السبب يقع فعلًا داخل تخصص المستشار.
+
+DROP إذا:
+- الارتباط مجرد كلمة عابرة أو فعالية وحيدة غير جوهرية.
+- السبب الحقيقي يخص مستشارًا قطاعيًا آخر.
+- لا توجد برامج أو أهداف مادية في القطاع.
+- الاستدلال يعتمد على احتمالات غير موجودة.
+
+حدود مهمة:
+- التطوع: يحتاج منظومة تطوع أو فرص ومتطوعين ماديين، وليس الشراكات وحدها.
+- الحقوق: هدف صريح بحقوق الفئة أو مناصرة/توعية حقوقية يمكن أن يكون تفعيلًا ماديًا حتى دون خدمة قانونية كاملة.
+- التعليم والبحث: هدف بحثي صريح أو برامج تعليمية/توعوية مادية يمكن أن يفعّله.
+- الثقافة والترفيه: برامج متكررة ثقافية/ترفيهية أو اجتماعية ذات مضمون ثقافي واضح.
+- البيئة: لا يكفي تحسين المشهد العام إذا لم يوجد تدخل بيئي حقيقي.
+- الإسكان: لا تكفي جودة الحياة العامة دون تدخل سكني/تنموي مكاني.
+- الدعوة وضيوف الرحمن: لا تكفي التوعية العامة دون سياق ديني أو خدمة ضيوف الرحمن.
+- الجمعيات المهنية: يجب أن تكون الجهة جمعية/رابطة مهنية أو نموذج عضوية مهنية جوهري.
+
+أعد تقييم الدرجة:
+KEEP = 50 إلى 100.
+DROP = أقل من 50.
+
+السبب النهائي:
+عربي مهني واضح فقط، دون حروف أجنبية أو معلومات مخترعة.
+
+الإخراج:
+SYSTEM_CODE|DECISION|FINAL_SCORE|REASON
+
+سطر لكل مرشح بلا استثناء.
+ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+
+def _v29_card(advisor):
+    return {
+        "system_code": advisor.get("system_code"),
+        "advisor_name": advisor.get(
+            "name_ar",
+            advisor.get("name_en"),
+        ),
+        "advisor_class": (
+            "SECTOR"
+            if int(advisor.get("advisor_id")) >= 26
+            else "FUNCTIONAL"
+        ),
+        "mission": advisor.get("mission"),
+        "owned_outcome": advisor.get("owned_outcome"),
+        "owns": (advisor.get("owns") or [])[:7],
+        "activation_when": (advisor.get("activation_when") or [])[:7],
+        "not_primary_when": (advisor.get("not_primary_when") or [])[:4],
+        "boundaries": (advisor.get("boundaries") or [])[:3],
+    }
+
+
+def _v29_fact_map(facts):
+    return {
+        fact["fact_id"]: {
+            "source": fact.get("source"),
+            "text": fact.get("text"),
+        }
+        for fact in facts
+    }
+
+
+def _v29_recover_missing(
+    prompt,
+    facts,
+    parsed,
+    expected_codes,
+    cards_by_code,
+    valid_fact_ids,
+):
+    missing = expected_codes - set(parsed.keys())
+
+    if not missing:
+        return parsed
+
+    recovery_cards = [
+        cards_by_code[code]
+        for code in sorted(missing)
+        if code in cards_by_code
+    ]
+
+    if not recovery_cards:
+        return parsed
+
+    print(
+        f"Rich v29 recovering {len(recovery_cards)} omitted advisor score rows...",
+        flush=True,
+    )
+
+    raw, _ = _v18_generate_text(
+        RICH_V29_RECOVERY_PROMPT,
+        {
+            "facts": facts,
+            "routing_cards": recovery_cards,
+        },
+        min(RICH_V18_MATCH_MAX_NEW_TOKENS, 1600),
+    )
+
+    recovered = _v26_parse_scores(
+        raw,
+        set(missing),
+        valid_fact_ids,
+    )
+
+    parsed.update(recovered)
+
+    for code in missing - set(recovered.keys()):
+        parsed[code] = {
+            "advisor_id": code,
+            "score": 0.0,
+            "evidence_ids": [],
+            "activation": "لا يوجد تقييم صالح.",
+            "reason": "لم يقدم النموذج تقييمًا صالحًا لهذا المستشار.",
+        }
+
+    return parsed
+
+
+def _v29_initial_score_all(
+    facts,
+    advisors,
+    valid_fact_ids,
+):
+    # Use calibrated v26 scoring semantics for the initial broad pass.
+    functional_cards = _v25_cards(
+        advisors,
+        "FUNCTIONAL",
+        compact=False,
+    )
+    sector_cards = _v25_cards(
+        advisors,
+        "SECTOR",
+        compact=False,
+    )
+
+    functional_codes = {
+        c["system_code"] for c in functional_cards
+    }
+    sector_codes = {
+        c["system_code"] for c in sector_cards
+    }
+
+    functional_raw, _ = _v18_generate_text(
+        RICH_V26_FUNCTIONAL_PROMPT,
+        {
+            "facts": facts,
+            "routing_cards": functional_cards,
+        },
+        RICH_V18_MATCH_MAX_NEW_TOKENS,
+    )
+
+    sector_raw, _ = _v18_generate_text(
+        RICH_V26_SECTOR_PROMPT,
+        {
+            "facts": facts,
+            "routing_cards": sector_cards,
+        },
+        RICH_V18_MATCH_MAX_NEW_TOKENS,
+    )
+
+    functional_scores = _v26_parse_scores(
+        functional_raw,
+        functional_codes,
+        valid_fact_ids,
+    )
+    sector_scores = _v26_parse_scores(
+        sector_raw,
+        sector_codes,
+        valid_fact_ids,
+    )
+
+    cards_by_code = {}
+    for advisor in advisors:
+        card = _v29_card(advisor)
+        if card.get("system_code"):
+            cards_by_code[card["system_code"]] = card
+
+    functional_scores = _v29_recover_missing(
+        RICH_V26_FUNCTIONAL_PROMPT,
+        facts,
+        functional_scores,
+        functional_codes,
+        cards_by_code,
+        valid_fact_ids,
+    )
+
+    sector_scores = _v29_recover_missing(
+        RICH_V26_SECTOR_PROMPT,
+        facts,
+        sector_scores,
+        sector_codes,
+        cards_by_code,
+        valid_fact_ids,
+    )
+
+    return functional_scores, sector_scores, cards_by_code
+
+
+def _v29_candidate_packages(
+    score_rows,
+    cards_by_code,
+    fact_map,
+):
+    packages = []
+
+    for code, item in score_rows.items():
+        if item.get("score", 0.0) < RICH_V29_MIN_PUBLIC_SCORE:
+            continue
+
+        evidence = []
+        for fid in item.get("evidence_ids", []):
+            if fid in fact_map:
+                evidence.append({
+                    "fact_id": fid,
+                    "source": fact_map[fid].get("source"),
+                    "text": fact_map[fid].get("text"),
+                })
+
+        packages.append({
+            "system_code": code,
+            "initial_score": item.get("score"),
+            "initial_activation": item.get("activation"),
+            "initial_reason": item.get("reason"),
+            "evidence": evidence,
+            "routing_card": cards_by_code.get(code, {}),
+        })
+
+    return packages
+
+
+def _v29_parse_verification(text, expected_codes):
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    rows = {}
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 3)
+        if len(parts) != 4:
+            continue
+
+        code_raw, decision_raw, score_raw, reason_raw = [
+            p.strip() for p in parts
+        ]
+
+        code = code_raw.strip()
+        if code not in expected_codes or code in rows:
+            continue
+
+        decision = decision_raw.upper()
+        if decision not in {"KEEP", "DROP"}:
+            continue
+
+        m = re.search(r"\d+(?:\.\d+)?", score_raw)
+        if not m:
+            continue
+
+        score = float(m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        reason = re.sub(r"\s+", " ", reason_raw).strip()
+
+        rows[code] = {
+            "advisor_id": code,
+            "decision": decision,
+            "score": round(score / 100.0, 4),
+            "reason": reason,
+        }
+
+    return rows
+
+
+def _v29_verify_candidates(prompt, packages):
+    if not packages:
+        return {}
+
+    expected_codes = {
+        item["system_code"]
+        for item in packages
+    }
+
+    raw, _ = _v18_generate_text(
+        prompt,
+        {
+            "candidates": packages,
+        },
+        min(RICH_V18_MATCH_MAX_NEW_TOKENS, 2200),
+    )
+
+    verified = _v29_parse_verification(
+        raw,
+        expected_codes,
+    )
+
+    # Omitted verification rows are rejected, never silently kept.
+    for code in expected_codes - set(verified.keys()):
+        verified[code] = {
+            "advisor_id": code,
+            "decision": "DROP",
+            "score": 0.0,
+            "reason": "لم يثبت التحقق النهائي وجود تفعيل حالي كافٍ لهذا المستشار.",
+        }
+
+    return verified
+
+
+def _v29_reason_contradiction(reason):
+    text = str(reason or "")
+
+    markers = (
+        "لا توجد أدلة",
+        "لا يوجد دليل",
+        "لا توجد فجوة",
+        "لا توجد حاجة",
+        "لا يوجد احتياج",
+        "حاجة محتملة",
+        "احتياج محتمل",
+        "قد يحتاج",
+        "قد تحتاج",
+        "ربما",
+        "لم يذكر",
+        "لم يُذكر",
+        "لم يتم توثيق",
+        "لم يتضح",
+        "إمكانية",
+    )
+
+    return any(marker in text for marker in markers)
+
+
+def advisory_match_rich_v29(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    fact_map = _v29_fact_map(facts)
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v29 pass A/B: scoring all 35 advisors...",
+        flush=True,
+    )
+
+    functional_scores, sector_scores, cards_by_code = _v29_initial_score_all(
+        facts,
+        advisors,
+        valid_fact_ids,
+    )
+
+    functional_packages = _v29_candidate_packages(
+        functional_scores,
+        cards_by_code,
+        fact_map,
+    )
+
+    sector_packages = _v29_candidate_packages(
+        sector_scores,
+        cards_by_code,
+        fact_map,
+    )
+
+    print(
+        f"Rich v29 pass C: verifying {len(functional_packages)} "
+        "functional candidates against their exact evidence...",
+        flush=True,
+    )
+
+    functional_verified = _v29_verify_candidates(
+        RICH_V29_FUNCTIONAL_VERIFY_PROMPT,
+        functional_packages,
+    )
+
+    print(
+        f"Rich v29 pass D: verifying {len(sector_packages)} "
+        "sector candidates against their exact evidence...",
+        flush=True,
+    )
+
+    sector_verified = _v29_verify_candidates(
+        RICH_V29_SECTOR_VERIFY_PROMPT,
+        sector_packages,
+    )
+
+    final_rows = {}
+    final_rows.update(functional_verified)
+    final_rows.update(sector_verified)
+
+    matches = []
+
+    for item in final_rows.values():
+        if item.get("decision") != "KEEP":
+            continue
+
+        if item.get("score", 0.0) < RICH_V29_MIN_PUBLIC_SCORE:
+            continue
+
+        if _v29_reason_contradiction(item.get("reason")):
+            print(
+                f"Rich v29 contradiction guard dropped {item['advisor_id']}.",
+                flush=True,
+            )
+            continue
+
+        matches.append(item)
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    # Foreign-script safety guard.
+    matches = _v21_repair_reasons(matches)
+
+    print(
+        f"Rich v29 final pool: {len(matches)} verified advisors "
+        f"with final score >= {RICH_V29_MIN_PUBLIC_SCORE:.2f}.",
+        flush=True,
+    )
+
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v30 — production fast + grounded + clean Arabic
+#
+# Production architecture:
+#   1) Build compact, granular Arabic facts.
+#   2) TWO model calls only:
+#        - advisors 1-25
+#        - advisors 26-35
+#   3) Model outputs ONLY: SYSTEM_CODE|SCORE|EVIDENCE_IDS
+#      (no generated public prose).
+#   4) Python validates the cited evidence against advisor-specific
+#      activation signals and boundaries.
+#   5) Python writes the public Arabic reason deterministically from
+#      the source facts. This eliminates garbled generated Arabic such
+#      as "براغم", broken words, Cyrillic/CJK contamination, etc.
+#   6) Return every genuinely grounded advisor with score >= 0.50.
+#
+# Normal path = 2 generations total.
+# A tiny recovery generation runs ONLY if the model omits advisor rows.
+# ---------------------------------------------------------------------
+
+RICH_V30_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V30_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V30_FUNCTIONAL_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V30_FUNCTIONAL_MAX_NEW_TOKENS", "700")
+)
+
+RICH_V30_SECTOR_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V30_SECTOR_MAX_NEW_TOKENS", "380")
+)
+
+RICH_V30_RECOVERY_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V30_RECOVERY_MAX_NEW_TOKENS", "280")
+)
+
+
+def _v30_normalize_text(value):
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("\u200f", " ").replace("\u200e", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _v30_trim(text, limit):
+    text = _v30_normalize_text(text)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].strip()
+    return cut + "…"
+
+
+def _v30_arabic_public_text(text):
+    """
+    Public prose safety:
+    - preserve Arabic-script letters, numbers, whitespace and punctuation.
+    - remove all Latin/Cyrillic/CJK/etc. letters.
+    - normalize spacing.
+    """
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    out = []
+
+    for ch in text:
+        category = unicodedata.category(ch)
+
+        if category.startswith("L"):
+            try:
+                name = unicodedata.name(ch)
+            except ValueError:
+                name = ""
+
+            if "ARABIC" in name:
+                out.append(ch)
+            else:
+                out.append(" ")
+            continue
+
+        if category.startswith("M"):
+            try:
+                name = unicodedata.name(ch)
+            except ValueError:
+                name = ""
+            if "ARABIC" in name:
+                out.append(ch)
+            continue
+
+        if (
+            category.startswith("N")
+            or category.startswith("P")
+            or category.startswith("Z")
+        ):
+            out.append(ch)
+            continue
+
+        if ch in {"٪", "﷼"}:
+            out.append(ch)
+        else:
+            out.append(" ")
+
+    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
+    cleaned = re.sub(r"\s+([،؛:,.!?؟])", r"\1", cleaned)
+    return cleaned
+
+
+def _v30_program_type_ar(value):
+    value = str(value or "").strip().lower()
+    if value == "project":
+        return "مشروع"
+    return "برنامج"
+
+
+def _v30_build_facts(organization, programs):
+    """
+    Granular facts make evidence citation easier and reduce hallucinated
+    "missing information = need" reasoning.
+    """
+    facts = []
+
+    def add(fid, source, text):
+        text = _v30_normalize_text(text)
+        if text:
+            facts.append({
+                "fact_id": fid,
+                "source": source,
+                "text": text,
+            })
+
+    add("O1", "اسم الجمعية", organization.get("name"))
+    add("O2", "نوع الجمعية", organization.get("type"))
+    add("O3", "القطاع", organization.get("sector"))
+
+    activity_fields = organization.get("activity_fields") or []
+    if isinstance(activity_fields, list) and activity_fields:
+        add(
+            "O4",
+            "مجالات النشاط",
+            "مجالات النشاط: " + "، ".join(
+                _v30_normalize_text(x)
+                for x in activity_fields
+                if _v30_normalize_text(x)
+            ),
+        )
+
+    add(
+        "O5",
+        "الوصف المختصر",
+        _v30_trim(organization.get("short_description"), 700),
+    )
+
+    add(
+        "O6",
+        "الوصف التفصيلي",
+        _v30_trim(organization.get("detailed_description"), 1400),
+    )
+
+    add(
+        "O7",
+        "الميزة المؤسسية",
+        _v30_trim(organization.get("competitive_advantage"), 650),
+    )
+
+    important_notes = organization.get("important_notes") or []
+    if isinstance(important_notes, list):
+        for idx, note in enumerate(important_notes, start=1):
+            add(
+                f"N{idx}",
+                f"ملاحظة مؤسسية {idx}",
+                _v30_trim(note, 420),
+            )
+
+    for idx, program in enumerate(programs, start=1):
+        if not isinstance(program, dict):
+            continue
+
+        name = _v30_normalize_text(program.get("name"))
+        ptype = _v30_program_type_ar(program.get("type"))
+        description = _v30_trim(program.get("description"), 520)
+        audience = _v30_trim(program.get("target_audience"), 220)
+        value = _v30_trim(program.get("beneficiary_value"), 260)
+        delivery = _v30_trim(program.get("delivery_method"), 260)
+
+        pieces = []
+        if name:
+            pieces.append(f'{ptype} "{name}"')
+        if description:
+            pieces.append(f"الوصف: {description}")
+        if audience:
+            pieces.append(f"الفئة المستهدفة: {audience}")
+        if value:
+            pieces.append(f"القيمة للمستفيد: {value}")
+        if delivery:
+            pieces.append(f"طريقة التنفيذ: {delivery}")
+
+        if pieces:
+            add(
+                f"P{idx}",
+                f"البرنامج أو المشروع {idx}",
+                "؛ ".join(pieces),
+            )
+
+    return facts
+
+
+def _v30_cards(advisors, start_id, end_id):
+    cards = []
+
+    for advisor in advisors:
+        advisor_num = int(advisor.get("advisor_id"))
+
+        if not (start_id <= advisor_num <= end_id):
+            continue
+
+        cards.append({
+            "system_code": advisor.get("system_code"),
+            "name": advisor.get("name_ar"),
+            "mission": _v30_trim(advisor.get("mission"), 250),
+            "owned_outcome": _v30_trim(
+                advisor.get("owned_outcome"),
+                280,
+            ),
+            "activation_when": [
+                _v30_trim(x, 140)
+                for x in (advisor.get("activation_when") or [])[:6]
+            ],
+            "not_primary_when": [
+                _v30_trim(x, 140)
+                for x in (advisor.get("not_primary_when") or [])[:3]
+            ],
+        })
+
+    return cards
+
+
+RICH_V30_FUNCTIONAL_PROMPT = """
+أنت محرك تقييم ملاءمة المستشارين الوظيفيين في منظومة أثر.
+
+المطلوب:
+قيّم كل مستشار موجود في ROUTING_CARDS بلا استثناء، اعتمادًا على FACTS فقط.
+
+الدرجة:
+90-100 = ارتباط مباشر ومحوري مثبت.
+80-89 = ارتباط مباشر قوي.
+70-79 = ارتباط واضح ومادي.
+60-69 = ارتباط حقيقي ومثبت لكنه أقل مركزية.
+50-59 = احتياج حالي حقيقي تدعمه واقعة تفعيل محددة.
+40-49 = احتمال أو فائدة ممكنة فقط، غير كافٍ للترشيح.
+أقل من 40 = غير مرتبط حاليًا.
+
+قاعدة 50:
+لا تمنح 50 أو أكثر لمجرد أن مجال المستشار موجود في الجمعية.
+يجب أن توجد واقعة تفعيل إيجابية فعلية.
+
+ممنوع الاستدلال بالغياب:
+- "لم يذكر وجود خطة" لا يعني الحاجة إلى مستشار الخطة.
+- "لا توجد معلومات مالية" لا يعني الحاجة إلى المستشار المالي.
+- "لا يوجد تحليل" لا يعني الحاجة إلى مستشار التحليل.
+- الإنجاز المرتفع لا يعني وجود فجوة؛ درجة حوكمة مرتفعة مثلًا ليست سببًا وحدها لاختيار مستشار الحوكمة.
+
+قواعد حدود الملكية:
+- كثرة البرامج قد تبرر مستشار المحافظ والبرامج والمشاريع إذا كان التعقيد فعليًا.
+- التشغيل الدوري أو اليومي أو الأسبوعي أو الموسمي متعدد الموارد والشركاء قد يبرر التخطيط التشغيلي.
+- الاعتماد على شبكة شراكات متعددة في التنفيذ قد يبرر أصحاب المصلحة والشراكات.
+- المتطوعون وحدهم لا يبررون مستشار الموارد البشرية.
+- وجود برامج وحده لا يبرر المالية أو العمليات أو البيانات أو الاتصال أو تنمية الموارد.
+- وجود رؤية ورسالة واضحة لا يبرر مستشار الهوية.
+- وجود أهداف واضحة لا يبرر مستشار القضايا والأهداف.
+- لا تخترع فجوة أو مشكلة أو قرارًا غير موجود في FACTS.
+
+الإخراج فقط:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS
+
+مثال شكلي:
+AOS-XX-00|72|N3,P2
+
+قواعد الإخراج:
+- سطر واحد لكل ROUTING_CARD بنفس عدد البطاقات.
+- SCORE من 0 إلى 100.
+- إذا SCORE >= 50 يجب ذكر من 1 إلى 3 EVIDENCE_IDS حقيقية من FACTS.
+- إذا SCORE < 50 يمكن كتابة NONE.
+- ممنوع كتابة الأسباب.
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+RICH_V30_SECTOR_PROMPT = """
+أنت محرك تقييم المستشارين القطاعيين في منظومة أثر.
+
+قيّم كل مستشار موجود في ROUTING_CARDS بلا استثناء اعتمادًا على FACTS فقط.
+
+للمستشار القطاعي:
+لا يشترط وجود مشكلة أو فجوة.
+يمكن أن يكون مناسبًا إذا كان القطاع نفسه جوهريًا ومتكررًا في رسالة الجمعية أو أهدافها أو برامجها وخدماتها.
+
+الدرجة:
+90-100 = القطاع محوري جدًا ومتكرر.
+80-89 = قطاع رئيسي وله عدة برامج أو خدمات واضحة.
+70-79 = قطاع مهم وله حضور مادي.
+60-69 = صلة قطاعية حقيقية وواضحة.
+50-59 = صلة فعلية مثبتة لكنها أقل مركزية.
+40-49 = نشاط جانبي أو عابر.
+أقل من 40 = غير مادي.
+
+قواعد:
+- فعالية عابرة واحدة لا تكفي وحدها.
+- لا تخترع قطاعًا غير موجود.
+- التطوع يحتاج منظومة تطوع أو متطوعين وفرصًا حقيقية.
+- الحقوق تحتاج هدفًا أو نشاطًا فعليًا متعلقًا بالحقوق أو المناصرة أو الدعم القانوني.
+- البيئة تحتاج تدخلًا بيئيًا حقيقيًا.
+- الإسكان يحتاج تدخلًا سكنيًا أو تنمويًا مكانيًا.
+- الدعوة وضيوف الرحمن تحتاج سياقًا دينيًا أو خدمة حجاج/معتمرين/زوار.
+- الجمعيات المهنية تحتاج نموذج جمعية أو رابطة مهنية وعضوية مهنية.
+
+الإخراج فقط:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS
+
+- سطر واحد لكل ROUTING_CARD.
+- SCORE من 0 إلى 100.
+- إذا SCORE >= 50 اذكر من 1 إلى 3 EVIDENCE_IDS حقيقية.
+- إذا SCORE < 50 يمكن كتابة NONE.
+- ممنوع الأسباب.
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+
+def _v30_digits_to_ascii(text):
+    table = str.maketrans(
+        "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+        "01234567890123456789",
+    )
+    return str(text).translate(table)
+
+
+def _v30_parse_scores(text, expected_codes, valid_fact_ids):
+    rows = {}
+
+    cleaned = (
+        str(text)
+        .replace("```text", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+
+        parts = line.split("|", 2)
+        if len(parts) != 3:
+            continue
+
+        code = parts[0].strip()
+        if code not in expected_codes or code in rows:
+            continue
+
+        score_text = _v30_digits_to_ascii(parts[1])
+        m = re.search(r"\d+(?:\.\d+)?", score_text)
+        if not m:
+            continue
+
+        score = float(m.group())
+        if score <= 1:
+            score *= 100
+        score = max(0.0, min(100.0, score))
+
+        evidence_ids = []
+        evidence_text = _v30_digits_to_ascii(parts[2]).upper()
+
+        if evidence_text != "NONE":
+            for token in re.findall(
+                r"\b(?:O|N|P)\d+\b",
+                evidence_text,
+            ):
+                if (
+                    token in valid_fact_ids
+                    and token not in evidence_ids
+                ):
+                    evidence_ids.append(token)
+
+        rows[code] = {
+            "advisor_id": code,
+            "score": round(score / 100.0, 4),
+            "evidence_ids": evidence_ids[:3],
+        }
+
+    return rows
+
+
+def _v30_recover_missing(
+    facts,
+    missing_cards,
+    valid_fact_ids,
+):
+    if not missing_cards:
+        return {}
+
+    expected_codes = {
+        c["system_code"]
+        for c in missing_cards
+    }
+
+    raw, _ = _v18_generate_text(
+        """قيّم كل بطاقة مستشار بلا استثناء اعتمادًا على FACTS فقط.
+أخرج فقط:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS
+إذا الدرجة 50 أو أكثر يجب ذكر دليل حقيقي من FACTS.
+50 أو أكثر يعني ملاءمة حالية مثبتة، وليس مجرد احتمال.
+ممنوع الأسباب وJSON وMarkdown.""",
+        {
+            "facts": facts,
+            "routing_cards": missing_cards,
+        },
+        RICH_V30_RECOVERY_MAX_NEW_TOKENS,
+    )
+
+    return _v30_parse_scores(
+        raw,
+        expected_codes,
+        valid_fact_ids,
+    )
+
+
+def _v30_score_group(
+    prompt,
+    facts,
+    cards,
+    valid_fact_ids,
+    max_new_tokens,
+):
+    expected_codes = {
+        c["system_code"]
+        for c in cards
+    }
+
+    raw, input_tokens = _v18_generate_text(
+        prompt,
+        {
+            "facts": facts,
+            "routing_cards": cards,
+        },
+        max_new_tokens,
+    )
+
+    rows = _v30_parse_scores(
+        raw,
+        expected_codes,
+        valid_fact_ids,
+    )
+
+    missing_codes = expected_codes - set(rows.keys())
+
+    if missing_codes:
+        card_map = {
+            c["system_code"]: c
+            for c in cards
+        }
+
+        missing_cards = [
+            card_map[code]
+            for code in sorted(missing_codes)
+        ]
+
+        print(
+            f"Rich v30 recovery: {len(missing_cards)} omitted advisor rows.",
+            flush=True,
+        )
+
+        recovered = _v30_recover_missing(
+            facts,
+            missing_cards,
+            valid_fact_ids,
+        )
+        rows.update(recovered)
+
+    for code in expected_codes - set(rows.keys()):
+        rows[code] = {
+            "advisor_id": code,
+            "score": 0.0,
+            "evidence_ids": [],
+        }
+
+    return rows, input_tokens
+
+
+# ------------------------------------------------------------------
+# Deterministic evidence guards
+# ------------------------------------------------------------------
+
+_V30_NEED_MARKERS = (
+    "حاجة",
+    "احتياج",
+    "فجوة",
+    "تحد",
+    "مشكلة",
+    "ضعف",
+    "تحسين",
+    "تطوير",
+    "مراجعة",
+    "إعادة",
+    "تحديث",
+    "توسع",
+    "توسيع",
+    "مستقبل",
+    "طموح",
+    "خطة",
+    "قرار",
+    "أولو",
+    "تنظيم",
+    "إدارة",
+    "استدام",
+)
+
+
+def _v30_contains_any(text, terms):
+    text = _v30_normalize_text(text).lower()
+    return any(term.lower() in text for term in terms)
+
+
+def _v30_evidence_blob(item, fact_map):
+    texts = []
+
+    for fid in item.get("evidence_ids", []):
+        fact = fact_map.get(fid)
+        if fact:
+            texts.append(fact["text"])
+
+    return " ".join(texts)
+
+
+def _v30_org_blob(organization, programs):
+    pieces = []
+
+    for key in [
+        "activity_fields",
+        "short_description",
+        "detailed_description",
+        "competitive_advantage",
+        "important_notes",
+    ]:
+        value = organization.get(key)
+
+        if isinstance(value, list):
+            pieces.extend(str(x) for x in value)
+        elif value:
+            pieces.append(str(value))
+
+    for p in programs:
+        if not isinstance(p, dict):
+            continue
+        for key in [
+            "name",
+            "description",
+            "target_audience",
+            "beneficiary_value",
+            "delivery_method",
+        ]:
+            value = p.get(key)
+            if value:
+                pieces.append(str(value))
+
+    return _v30_normalize_text(" ".join(pieces)).lower()
+
+
+def _v30_positive_need(text):
+    return _v30_contains_any(text, _V30_NEED_MARKERS)
+
+
+def _v30_gate(advisor_num, evidence_blob, org_blob, program_count):
+    """
+    This is not the scoring engine.
+    AI still assigns the relevance score.
+    The gate only rejects impossible/unsupported activations.
+    """
+
+    e = _v30_normalize_text(evidence_blob).lower()
+    o = org_blob
+
+    if not e:
+        return False
+
+    # Leadership / diagnosis / strategy
+    if advisor_num == 1:
+        return (
+            _v30_contains_any(
+                e,
+                (
+                    "قرار تنفيذي",
+                    "أولويات",
+                    "قيادة",
+                    "مجلس",
+                    "إعادة تنظيم",
+                    "إعادة هيكلة",
+                    "توسع",
+                    "توسيع",
+                    "موارد",
+                ),
+            )
+            and _v30_positive_need(e)
+        )
+
+    if advisor_num == 2:
+        return _v30_contains_any(
+            e,
+            (
+                "نضج",
+                "تشخيص",
+                "جاهزية",
+                "فجوة",
+                "قدرات",
+                "خط أساس",
+                "تقييم مؤسسي",
+            ),
+        )
+
+    if advisor_num == 3:
+        return _v30_contains_any(
+            e,
+            (
+                "فرص",
+                "تهديد",
+                "بيئة خارج",
+                "بيئة داخل",
+                "اتجاهات",
+                "منافس",
+                "تحليل داخلي",
+                "تحليل خارجي",
+            ),
+        )
+
+    if advisor_num == 4:
+        return _v30_contains_any(
+            e,
+            (
+                "شراكة",
+                "شراكات",
+                "شريك",
+                "شركاء",
+                "أصحاب المصلحة",
+                "جهات",
+            ),
+        )
+
+    if advisor_num == 5:
+        return _v30_contains_any(
+            e,
+            (
+                "تحول",
+                "تغيير",
+                "إعادة هيكلة",
+                "إعادة تنظيم",
+                "تبني",
+                "مقاومة",
+                "انتقال",
+            ),
+        )
+
+    if advisor_num == 6:
+        return _v30_contains_any(
+            e,
+            (
+                "جودة",
+                "رضا",
+                "شكوى",
+                "شكاوى",
+                "معيار",
+                "معايير",
+                "تميز",
+                "عدم مطابقة",
+            ),
+        ) and _v30_positive_need(e)
+
+    if advisor_num == 7:
+        return _v30_contains_any(
+            e,
+            (
+                "مخاطر",
+                "خطر",
+                "استمرارية",
+                "أزمة",
+                "أزمات",
+                "طوارئ",
+                "تعطل",
+            ),
+        )
+
+    if advisor_num == 8:
+        return (
+            _v30_contains_any(
+                e,
+                (
+                    "استراتيجية",
+                    "استراتيجي",
+                    "أولويات",
+                    "توجهات",
+                    "خطة استراتيجية",
+                ),
+            )
+            and _v30_positive_need(e)
+        )
+
+    if advisor_num == 9:
+        return (
+            _v30_contains_any(
+                e,
+                ("رؤية", "رسالة", "قيم", "هوية"),
+            )
+            and _v30_contains_any(
+                e,
+                ("تطوير", "مراجعة", "إعادة", "صياغة", "تحديث", "غير واضحة"),
+            )
+        )
+
+    if advisor_num == 10:
+        return (
+            _v30_contains_any(
+                e,
+                ("قضية استراتيجية", "قضايا استراتيجية", "أهداف استراتيجية", "أولويات"),
+            )
+            and _v30_contains_any(
+                e,
+                ("تعارض", "ترتيب", "إعادة صياغة", "تحديد", "تطوير", "مراجعة"),
+            )
+        )
+
+    if advisor_num == 11:
+        return _v30_contains_any(
+            e,
+            (
+                "مبادرة جديدة",
+                "برنامج جديد",
+                "مشروع جديد",
+                "تصميم مبادرة",
+                "تطوير مبادرة",
+                "إطلاق",
+                "مستقبل",
+                "مستقبلي",
+                "طموح",
+            ),
+        )
+
+    if advisor_num == 12:
+        cadence_terms = (
+            "أسبوع",
+            "أسبوعي",
+            "يومي",
+            "يومياً",
+            "يوميًا",
+            "عدة أيام",
+            "ثلاثة أيام",
+            "موسم",
+            "موسمي",
+            "رمضان",
+            "تشغيل",
+            "جدول",
+            "مواعيد",
+        )
+        return _v30_contains_any(e, cadence_terms)
+
+    if advisor_num == 13:
+        return (
+            _v30_contains_any(
+                e,
+                (
+                    "محفظة",
+                    "برامج متعددة",
+                    "مبادرات متعددة",
+                    "مسارات",
+                    "61 برنامج",
+                    "عشرات البرامج",
+                ),
+            )
+            or program_count >= 4
+        )
+
+    if advisor_num == 14:
+        return _v30_contains_any(
+            e,
+            (
+                "مؤشر",
+                "مؤشرات",
+                "مستهدف",
+                "لوحة",
+                "أداء",
+                "مقياس الرضا",
+            ),
+        )
+
+    if advisor_num == 15:
+        return _v30_contains_any(
+            e,
+            (
+                "قياس الأثر",
+                "الأثر الاجتماعي",
+                "تقييم",
+                "نتائج",
+                "بحث",
+                "دراسة",
+                "مقياس الرضا",
+            ),
+        )
+
+    # Governance / finance / growth / organisation / operations / tech / data
+    if advisor_num == 16:
+        governance = _v30_contains_any(
+            e,
+            (
+                "حوكمة",
+                "امتثال",
+                "صلاحيات",
+                "سياسات",
+                "لجان",
+                "إفصاح",
+                "تعارض مصالح",
+                "مساءلة",
+            ),
+        )
+        governance_need = _v30_contains_any(
+            e,
+            (
+                "فجوة",
+                "ضعف",
+                "تحسين",
+                "مراجعة",
+                "تعارض",
+                "غير واضح",
+                "التزام",
+                "مخالفة",
+            ),
+        )
+        high_score_only = (
+            _v30_contains_any(e, ("99.", "99٪", "99%"))
+            and not governance_need
+        )
+        return governance and governance_need and not high_score_only
+
+    if advisor_num == 17:
+        finance_terms = (
+            "موازنة",
+            "ميزانية",
+            "تكلفة",
+            "سيولة",
+            "تدفق نقد",
+            "انحراف مالي",
+            "مصروف",
+            "مصروفات",
+            "إيراد",
+            "إيرادات",
+            "التزامات مالية",
+            "إعادة تخصيص",
+        )
+        return _v30_contains_any(e, finance_terms) and _v30_positive_need(e)
+
+    if advisor_num == 18:
+        return _v30_contains_any(
+            e,
+            (
+                "تنمية الموارد",
+                "استدامة مالية",
+                "تبرعات",
+                "تبرع",
+                "منح",
+                "مانحين",
+                "مانح",
+                "تنويع الإيرادات",
+                "اعتماد على ممول",
+                "فجوة تمويل",
+                "جمع التبرعات",
+                "مصادر دخل",
+            ),
+        )
+
+    if advisor_num == 19:
+        return _v30_contains_any(
+            e,
+            (
+                "وقف",
+                "أوقاف",
+                "استثمار اجتماعي",
+                "استثمار مؤثر",
+                "أصل استثماري",
+                "سياسة استثمار",
+            ),
+        )
+
+    if advisor_num == 20:
+        hr_terms = (
+            "موظف",
+            "موظفين",
+            "هيكل",
+            "وظيف",
+            "قوى عاملة",
+            "عبء العمل",
+            "جدارات",
+            "أداء الموظفين",
+            "مهارات الموظفين",
+            "توظيف",
+            "أدوار وظيفية",
+        )
+        return _v30_contains_any(e, hr_terms)
+
+    if advisor_num == 21:
+        return _v30_contains_any(
+            e,
+            (
+                "عملية",
+                "عمليات",
+                "إجراء",
+                "إجراءات",
+                "تدفق",
+                "اختناق",
+                "تأخير",
+                "هدر",
+                "إعادة عمل",
+                "رحلة خدمة",
+                "زمن انتظار",
+            ),
+        )
+
+    if advisor_num == 22:
+        return _v30_contains_any(
+            e,
+            (
+                "اتصال",
+                "سمعة",
+                "رسائل",
+                "إعلام",
+                "صورة ذهنية",
+                "علاقات عامة",
+                "محتوى",
+                "اتصال داخلي",
+                "أزمة اتصال",
+            ),
+        )
+
+    if advisor_num == 23:
+        return _v30_contains_any(
+            e,
+            (
+                "تسويق رقمي",
+                "حملة",
+                "حملات",
+                "إعلانات",
+                "تحويل",
+                "اكتساب",
+                "صفحة هبوط",
+                "إعادة استهداف",
+            ),
+        )
+
+    if advisor_num == 24:
+        return _v30_contains_any(
+            e,
+            (
+                "تحول رقمي",
+                "ذكاء اصطناعي",
+                "أتمتة",
+                "نظام",
+                "منصة",
+                "تكامل",
+                "تقنية",
+                "رقمنة",
+                "أودو",
+                "أرشيف إلكتروني",
+            ),
+        )
+
+    if advisor_num == 25:
+        data_terms = (
+            "حوكمة البيانات",
+            "جودة البيانات",
+            "قاموس بيانات",
+            "مصدر الحقيقة",
+            "تقارير",
+            "سجلات",
+            "أرشيف",
+            "إدارة معرفة",
+            "توثيق",
+            "صلاحيات وصول",
+        )
+        return _v30_contains_any(e, data_terms) and _v30_positive_need(e)
+
+    # Sector advisors
+    sector_terms = {
+        26: (
+            "ثقاف",
+            "ترفيه",
+            "تراث",
+            "فنون",
+            "مسرح",
+            "موسيقى",
+            "مهرجان",
+            "ديوانية",
+        ),
+        27: (
+            "تعليم",
+            "تدريب",
+            "بحث",
+            "دراسة",
+            "طلاب",
+            "مدارس",
+            "قدوات",
+            "نقل المعرفة",
+        ),
+        28: (
+            "صح",
+            "مستشفى",
+            "علاج",
+            "فحص",
+            "فحوصات",
+            "وقاية",
+            "تغذية",
+            "العلاج الطبيعي",
+        ),
+        29: (
+            "رعاية اجتماعية",
+            "خدمات اجتماعية",
+            "كبار السن",
+            "أسرة",
+            "أسر",
+            "تمكين اجتماعي",
+            "جودة الحياة",
+            "دعم اجتماعي",
+        ),
+        30: (
+            "بيئة",
+            "بيئي",
+            "تشجير",
+            "نفايات",
+            "إعادة تدوير",
+            "مياه",
+            "طاقة",
+            "مناخ",
+            "تنوع حيوي",
+        ),
+        31: (
+            "سكن",
+            "إسكان",
+            "ترميم",
+            "إيجار",
+            "منازل",
+            "أحياء",
+            "تنمية محلية",
+            "سبل العيش",
+        ),
+        32: (
+            "حقوق",
+            "مناصرة",
+            "قانون",
+            "عدالة",
+            "شكوى",
+            "دعم قانوني",
+            "حماية حق",
+        ),
+        33: (
+            "تطوع",
+            "متطوع",
+            "متطوعين",
+            "فرص تطوعية",
+            "بناء قدرات",
+            "حاضنة",
+            "مسرعة",
+        ),
+        34: (
+            "دعوة",
+            "ديني",
+            "دينية",
+            "حجاج",
+            "معتمرين",
+            "ضيوف الرحمن",
+            "عمرة",
+            "قرآن",
+            "جاليات",
+        ),
+        35: (
+            "جمعية مهنية",
+            "رابطة مهنية",
+            "عضوية",
+            "أعضاء مهنيين",
+            "تطوير مهني",
+            "لجان مهنية",
+        ),
+    }
+
+    if advisor_num in sector_terms:
+        return _v30_contains_any(e, sector_terms[advisor_num])
+
+    return False
+
+
+def _v30_reason(advisor, item, fact_map):
+    evidence_texts = []
+
+    for fid in item.get("evidence_ids", []):
+        fact = fact_map.get(fid)
+        if not fact:
+            continue
+
+        text = _v30_arabic_public_text(
+            _v30_trim(fact["text"], 230)
+        )
+        if text:
+            evidence_texts.append(text)
+
+    name = _v30_arabic_public_text(
+        advisor.get("name_ar") or "هذا المستشار"
+    )
+
+    if not evidence_texts:
+        return (
+            f"يرتبط {name} بالجمعية وفق نطاق اختصاصه، "
+            "وتوجد في بياناتها وقائع مباشرة تبرر إشراكه في التقييم الاستشاري الحالي."
+        )
+
+    if len(evidence_texts) == 1:
+        return (
+            f"يرتبط {name} بالجمعية لأن البيانات توضح أن "
+            f"{evidence_texts[0]}. "
+            "وهذه واقعة مباشرة تقع ضمن نطاق اختصاصه وتبرر إشراكه "
+            "دون افتراض احتياجات غير مذكورة في بيانات الجمعية."
+        )
+
+    return (
+        f"يرتبط {name} بالجمعية لأن البيانات توضح أن "
+        f"{evidence_texts[0]}، كما توضح أن {evidence_texts[1]}. "
+        "وهاتان الواقعتان تقعان مباشرة ضمن نطاق اختصاصه وتبرران إشراكه "
+        "في التقييم الاستشاري الحالي."
+    )
+
+
+def advisory_match_rich_v30(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = _v30_build_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    fact_map = {
+        fact["fact_id"]: fact
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+    advisor_by_code = {
+        advisor["system_code"]: advisor
+        for advisor in advisors
+    }
+
+    functional_cards = _v30_cards(
+        advisors,
+        1,
+        25,
+    )
+
+    sector_cards = _v30_cards(
+        advisors,
+        26,
+        35,
+    )
+
+    print(
+        "Rich v30: scoring 25 functional advisors (compact, no prose generation)...",
+        flush=True,
+    )
+
+    functional_scores, functional_input_tokens = _v30_score_group(
+        RICH_V30_FUNCTIONAL_PROMPT,
+        facts,
+        functional_cards,
+        valid_fact_ids,
+        RICH_V30_FUNCTIONAL_MAX_NEW_TOKENS,
+    )
+
+    print(
+        "Rich v30: scoring 10 sector advisors (compact, no prose generation)...",
+        flush=True,
+    )
+
+    sector_scores, sector_input_tokens = _v30_score_group(
+        RICH_V30_SECTOR_PROMPT,
+        facts,
+        sector_cards,
+        valid_fact_ids,
+        RICH_V30_SECTOR_MAX_NEW_TOKENS,
+    )
+
+    all_scores = {}
+    all_scores.update(functional_scores)
+    all_scores.update(sector_scores)
+
+    org_blob = _v30_org_blob(
+        organization,
+        programs,
+    )
+
+    matches = []
+
+    for code, item in all_scores.items():
+        if item["score"] < RICH_V30_MIN_PUBLIC_SCORE:
+            continue
+
+        if not item.get("evidence_ids"):
+            continue
+
+        advisor = advisor_by_code.get(code)
+        if not advisor:
+            continue
+
+        advisor_num = int(advisor["advisor_id"])
+
+        evidence_blob = _v30_evidence_blob(
+            item,
+            fact_map,
+        )
+
+        if not _v30_gate(
+            advisor_num,
+            evidence_blob,
+            org_blob,
+            len(programs),
+        ):
+            print(
+                f"Rich v30 evidence guard dropped {code} "
+                f"(score={item['score']:.2f}).",
+                flush=True,
+            )
+            continue
+
+        matches.append({
+            "advisor_id": code,
+            "score": item["score"],
+            "reason": _v30_reason(
+                advisor,
+                item,
+                fact_map,
+            ),
+        })
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    print(
+        "Rich v30 complete: "
+        f"{len(matches)} advisors >= {RICH_V30_MIN_PUBLIC_SCORE:.2f}; "
+        f"input tokens functional={functional_input_tokens}, "
+        f"sector={sector_input_tokens}. "
+        "Public reasons were generated deterministically in Python.",
+        flush=True,
+    )
+
+    return {
+        "ranked": matches
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -8752,7 +10604,7 @@ def handler(job):
 
             return {
                 "status": "advisory_match_preflight_ok",
-                "routing_engine": "rich_ai_v19_35_advisors",
+                "routing_engine": "rich_ai_v30_fast_grounded_arabic",
                 "model": MATCHER_BASE_MODEL,
                 "registry_path": RICH_REGISTRY_PATH,
                 "advisor_count": len(
@@ -8760,7 +10612,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v28(
+        return advisory_match_rich_v30(
             job_input
         )
 

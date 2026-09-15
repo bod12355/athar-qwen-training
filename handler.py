@@ -6429,6 +6429,398 @@ def advisory_match_rich_v27(job_input):
     }
 
 
+# ---------------------------------------------------------------------
+# Rich AI Router v28 — three focused scoring panels
+#
+# Design:
+# - Every advisor is still scored.
+# - No global 35-advisor adjudication pass.
+# - Advisors are scored in 3 focused panels so the model does not lose
+#   specialist ownership boundaries:
+#     Panel A: advisors 1-15  (leadership + strategy)
+#     Panel B: advisors 16-25 (institutional functions + growth)
+#     Panel C: advisors 26-35 (sector advisors)
+# - Final public rule is unchanged: score >= 0.50 + grounded evidence.
+# - 0.50 means CURRENT MATERIAL RELEVANCE, never "maybe useful".
+# ---------------------------------------------------------------------
+
+RICH_V28_MIN_PUBLIC_SCORE = float(
+    os.environ.get("RICH_V28_MIN_PUBLIC_SCORE", "0.50")
+)
+
+RICH_V28_PANEL_A_PROMPT = """
+أنت محرك تقييم مستشاري القيادة والاستراتيجية في منظومة أثر.
+قيّم كل مستشار في ROUTING_CARDS بلا استثناء.
+
+تعريف الدرجة:
+90-100 ارتباط مباشر ومحوري ومثبت.
+80-89 ارتباط مباشر قوي.
+70-79 ارتباط واضح ومادي.
+60-69 ارتباط حقيقي ومثبت لكنه أقل مركزية.
+50-59 احتياج حالي حقيقي له واقعة تفعيل محددة.
+40-49 احتمال أو فائدة ممكنة فقط.
+أقل من 40 لا توجد ملاءمة حالية كافية.
+
+قاعدة حاسمة:
+50 أو أكثر لا تعني "قد يكون مفيدًا".
+يجب أن توجد واقعة حالية محددة في FACTS تحقق شرط تفعيل حقيقي للمستشار.
+
+قواعد الملكية:
+- المستشار التنفيذي لا يأخذ دور إدارة المحفظة أو التشغيل لمجرد كثرة البرامج.
+- مستشار التحليل الداخلي والخارجي لا يُفعّل لمجرد وجود برامج أو شركاء؛ يجب وجود قرار أو حاجة لتحليل البيئة أو الفرص أو التهديدات أو العوامل الداخلية والخارجية.
+- مستشار أصحاب المصلحة والشراكات يُفعّل إذا كان التنفيذ يعتمد فعليًا على شبكة شركاء متعددة أو توجد حاجة لإدارة القيمة والعلاقات والأدوار بين الشركاء.
+- مستشار التغيير لا يُفعّل لمجرد إطلاق برامج؛ يجب وجود تحول أو انتقال أو تبنٍ أو مقاومة أو تغيير مؤسسي حقيقي.
+- مستشار الجودة لا يُفعّل لمجرد وجود خدمات؛ يجب وجود حاجة جودة أو معايير أو عدم مطابقة أو تحسين خدمة موثق.
+- مستشار المخاطر لا يُفعّل لمجرد وجود نشاط؛ يجب وجود مخاطر أو استمرارية أو تعرض موثق.
+- مستشار التخطيط الاستراتيجي لا يُفعّل لمجرد وجود أهداف أو برامج؛ يجب وجود مراجعة أو مفاضلة أو تحديث أو قرار استراتيجي.
+- مستشار الهوية لا يُفعّل إذا كانت الرؤية والرسالة والقيم واضحة ولا توجد حاجة لإعادة بنائها.
+- مستشار القضايا والأهداف لا يُفعّل لمجرد وجود أهداف؛ يجب وجود مشكلة في القضايا أو الأولويات أو صياغة النتائج.
+- مستشار تصميم المبادرات لا يُفعّل لمجرد وجود مبادرات قائمة؛ يجب وجود تصميم أو إعادة تصميم تدخل.
+- مستشار التخطيط التشغيلي يمكن أن يُفعّل عند وجود تشغيل متكرر أو موسمي أو يومي/أسبوعي متعدد الموارد والشركاء ويحتاج تنسيقًا تشغيليًا.
+- مستشار المحافظ والبرامج والمشاريع يمكن أن يُفعّل عندما توجد محفظة كبيرة ومتعددة المسارات تحتاج تنظيم الأولويات والترابط والموارد والمنافع.
+- مستشار المؤشرات لا يُفعّل لمجرد وجود أرقام.
+- مستشار المتابعة والتقييم والأثر لا يُفعّل لمجرد وجود بيانات؛ يجب وجود هدف قياس نتائج أو أثر أو تقييم فعلي.
+
+إذا كان السبب يحتوي معنى:
+"قد يحتاج" أو "حاجة محتملة" أو "ربما" أو "لا توجد أدلة واضحة"
+فالدرجة يجب أن تكون أقل من 50.
+
+ممنوع اختراع فجوة أو مشكلة غير موجودة في FACTS.
+
+الإخراج:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|ACTIVATION|REASON
+
+- سطر واحد لكل بطاقة.
+- SCORE من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط أو NONE.
+- ACTIVATION يجب أن تكون الواقعة الفعلية التي فعّلت المستشار، أو "لا يوجد تفعيل كافٍ".
+- REASON عربي فقط.
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+RICH_V28_PANEL_B_PROMPT = """
+أنت محرك تقييم مستشاري الوظائف المؤسسية والنمو في منظومة أثر.
+قيّم كل مستشار في ROUTING_CARDS بلا استثناء.
+
+تعريف الدرجة:
+90-100 ارتباط مباشر ومحوري ومثبت.
+80-89 ارتباط مباشر قوي.
+70-79 ارتباط واضح ومادي.
+60-69 ارتباط حقيقي ومثبت لكنه أقل مركزية.
+50-59 احتياج حالي حقيقي له واقعة تفعيل محددة.
+40-49 احتمال أو فائدة ممكنة فقط.
+أقل من 40 لا توجد ملاءمة حالية كافية.
+
+قاعدة حاسمة:
+مجرد وجود المجال داخل أي جمعية لا يساوي احتياجًا استشاريًا.
+50 أو أكثر يحتاج واقعة تفعيل محددة داخل FACTS.
+
+قواعد صارمة:
+- الحوكمة: ارتفاع درجة الحوكمة إنجاز وليس فجوة. لا تُفعّل المستشار إلا بمتطلب حوكمي أو امتثال أو صلاحيات أو سياسة أو فجوة موثقة.
+- المالية والموازنات: وجود برامج أو مشروع ممول لا يكفي. يلزم موازنة أو تكلفة أو سيولة أو انحراف أو تدفق أو قرار مالي أو إعادة تخصيص موثق.
+- الاستدامة المالية وتنمية الموارد: وجود تمويل لا يكفي. يلزم تنويع إيرادات أو فجوة تمويل أو اعتماد على ممول أو منح أو مانحين أو استراتيجية موارد موثقة.
+- الأوقاف والاستثمار الاجتماعي: لا يُفعّل بلا وقف أو أصل استثماري أو استثمار اجتماعي أو قرار واضح في هذا المجال.
+- الموارد البشرية والتصميم التنظيمي: المتطوعون ليسوا موظفين. كثرة المتطوعين لا تُفعّل الموارد البشرية وحدها. يلزم هيكل أو موظفون أو أدوار أو عبء عمل أو قوى عاملة أو جدارات أو أداء أو إعادة تنظيم موثق.
+- العمليات: وجود برامج لا يكفي. يلزم إجراء أو تدفق خدمة أو تأخير أو اختناق أو هدر أو إعادة عمل أو تحسين عملية أو أتمتة عملية موثقة.
+- الاتصال المؤسسي: وجود برامج لا يكفي. يلزم هدف أو مشكلة اتصال أو سمعة أو رسائل أو جمهور أو أزمة اتصال موثقة.
+- التسويق الرقمي: لا يُفعّل بلا حملة أو اكتساب أو تحويل أو إعلان أو قمع رقمي أو هدف تسويقي محدد.
+- التحول الرقمي والذكاء الاصطناعي: لا يُفعّل بلا مشكلة رقمية أو نظام أو أتمتة أو تكامل أو حالة استخدام أو قرار تقني موثق.
+- البيانات والمعرفة والتقارير: وجود أرقام أو تقارير لا يكفي. يلزم مشكلة جودة بيانات أو مصدر حقيقة أو حوكمة بيانات أو معرفة حرجة أو تقارير تحتاج إعادة تصميم موثقة.
+
+إذا كان السبب يحتوي معنى:
+"لأن لديها برامج متعددة"
+"قد تحتاج"
+"حاجة محتملة"
+"ربما"
+"لا توجد أدلة"
+من دون واقعة تفعيل تخصصية، فالدرجة يجب أن تكون أقل من 50.
+
+ممنوع اختراع فجوة أو حاجة.
+
+الإخراج:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|ACTIVATION|REASON
+
+- سطر واحد لكل بطاقة.
+- SCORE من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط أو NONE.
+- ACTIVATION واقعة تفعيل تخصصية محددة أو "لا يوجد تفعيل كافٍ".
+- REASON عربي فقط.
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+RICH_V28_PANEL_C_PROMPT = """
+أنت محرك تقييم المستشارين القطاعيين في منظومة أثر.
+قيّم كل مستشار في ROUTING_CARDS بلا استثناء.
+
+تعريف الدرجة:
+90-100 القطاع جوهري جدًا ومتكرر في رسالة الجمعية وبرامجها.
+80-89 القطاع رئيسي وله عدة برامج أو خدمات واضحة.
+70-79 القطاع مهم وله حضور مادي متكرر.
+60-69 صلة قطاعية حقيقية وواضحة لكنها أقل مركزية.
+50-59 صلة قطاعية فعلية ومثبتة وليست عابرة.
+40-49 نشاط محدود أو جانبي لا يكفي للترشيح.
+أقل من 40 غير مادي للحالة.
+
+بالنسبة للمستشار القطاعي، لا يلزم وجود "مشكلة":
+يكفي أن يكون القطاع نفسه جوهريًا ومتكررًا في رسالة الجمعية أو أهدافها أو محفظة برامجها.
+
+لكن:
+- نشاط واحد عابر لا يكفي.
+- كلمة واحدة في وصف الجمعية لا تكفي.
+- يجب أن توجد برامج متكررة أو هدف صريح أو خدمة جوهرية.
+
+حدود مهمة:
+- مستشار التطوع يُفعّل بسبب منظومة تطوع وبناء قدرات، لا بسبب الشراكات وحدها.
+- مستشار الحقوق يُفعّل عند وجود حقوق أو مناصرة أو دعم قانوني أو توعية حقوقية جوهرية.
+- مستشار التعليم والبحث يُفعّل عند وجود برامج تعليمية/بحثية مادية أو هدف بحثي وتعليمي صريح.
+- مستشار البيئة لا يُفعّل بسبب "تحسين المشهد" إذا لم يكن هناك تدخل بيئي حقيقي.
+- مستشار الإسكان لا يُفعّل بسبب جودة الحياة عامة دون تدخل سكني أو تنموي مكاني.
+- مستشار الدعوة وخدمة ضيوف الرحمن لا يُفعّل بسبب التوعية العامة دون سياق ديني أو ضيوف الرحمن.
+- مستشار الجمعيات المهنية لا يُفعّل إلا إذا كانت الجهة جمعية/رابطة مهنية أو لديها نموذج عضوية مهنية جوهري.
+
+إذا كان السبب يقول "لا توجد برامج محددة" أو "غير واضح" فالدرجة يجب أن تكون أقل من 50.
+
+الإخراج:
+SYSTEM_CODE|SCORE|EVIDENCE_IDS|ACTIVATION|REASON
+
+- سطر واحد لكل بطاقة.
+- SCORE من 0 إلى 100.
+- EVIDENCE_IDS من FACTS فقط أو NONE.
+- ACTIVATION يذكر البرنامج أو الهدف القطاعي المثبت.
+- REASON عربي فقط.
+- ممنوع JSON وMarkdown وأي شرح إضافي.
+"""
+
+
+def _v28_cards_for_range(advisors, start_id, end_id):
+    cards = []
+
+    for advisor in advisors:
+        advisor_num = int(advisor.get("advisor_id"))
+        if not (start_id <= advisor_num <= end_id):
+            continue
+
+        cards.append({
+            "system_code": advisor.get("system_code"),
+            "advisor_name": advisor.get(
+                "name_ar",
+                advisor.get("name_en"),
+            ),
+            "mission": advisor.get("mission"),
+            "owned_outcome": advisor.get("owned_outcome"),
+            "owns": (advisor.get("owns") or [])[:7],
+            "activation_when": (advisor.get("activation_when") or [])[:7],
+            "not_primary_when": (advisor.get("not_primary_when") or [])[:4],
+            "boundaries": (advisor.get("boundaries") or [])[:3],
+        })
+
+    return cards
+
+
+def _v28_score_panel(
+    prompt,
+    facts,
+    advisors,
+    start_id,
+    end_id,
+    valid_fact_ids,
+):
+    cards = _v28_cards_for_range(
+        advisors,
+        start_id,
+        end_id,
+    )
+
+    expected_codes = {
+        card["system_code"]
+        for card in cards
+        if card.get("system_code")
+    }
+
+    try:
+        raw, _ = _v18_generate_text(
+            prompt,
+            {
+                "facts": facts,
+                "routing_cards": cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+    except ValueError as exc:
+        if "input too long" not in str(exc).lower():
+            raise
+
+        compact_cards = []
+        for card in cards:
+            compact_cards.append({
+                "system_code": card["system_code"],
+                "advisor_name": card["advisor_name"],
+                "owned_outcome": card["owned_outcome"],
+                "owns": card["owns"][:5],
+                "activation_when": card["activation_when"][:5],
+                "not_primary_when": card["not_primary_when"][:2],
+            })
+
+        raw, _ = _v18_generate_text(
+            prompt,
+            {
+                "facts": facts,
+                "routing_cards": compact_cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+    parsed = _v26_parse_scores(
+        raw,
+        expected_codes,
+        valid_fact_ids,
+    )
+
+    for code in expected_codes - set(parsed.keys()):
+        parsed[code] = {
+            "advisor_id": code,
+            "score": 0.0,
+            "evidence_ids": [],
+            "activation": "لا يوجد تقييم صالح.",
+            "reason": "لم يقدم النموذج تقييمًا صالحًا لهذا المستشار.",
+        }
+
+    return parsed
+
+
+def _v28_has_contradiction(item):
+    text = (
+        str(item.get("activation", ""))
+        + " "
+        + str(item.get("reason", ""))
+    )
+
+    markers = (
+        "لا توجد أدلة",
+        "لا يوجد دليل",
+        "لا توجد فجوة",
+        "لا توجد حاجة",
+        "لا يوجد احتياج",
+        "حاجة محتملة",
+        "احتياج محتمل",
+        "قد يحتاج",
+        "قد تحتاج",
+        "ربما",
+        "لا توجد برامج",
+        "لا يوجد برنامج",
+        "غير واضح",
+    )
+
+    return any(marker in text for marker in markers)
+
+
+def advisory_match_rich_v28(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        fact["fact_id"]
+        for fact in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+
+    print(
+        "Rich v28 panel A: scoring advisors 1-15...",
+        flush=True,
+    )
+    panel_a = _v28_score_panel(
+        RICH_V28_PANEL_A_PROMPT,
+        facts,
+        advisors,
+        1,
+        15,
+        valid_fact_ids,
+    )
+
+    print(
+        "Rich v28 panel B: scoring advisors 16-25...",
+        flush=True,
+    )
+    panel_b = _v28_score_panel(
+        RICH_V28_PANEL_B_PROMPT,
+        facts,
+        advisors,
+        16,
+        25,
+        valid_fact_ids,
+    )
+
+    print(
+        "Rich v28 panel C: scoring advisors 26-35...",
+        flush=True,
+    )
+    panel_c = _v28_score_panel(
+        RICH_V28_PANEL_C_PROMPT,
+        facts,
+        advisors,
+        26,
+        35,
+        valid_fact_ids,
+    )
+
+    all_scores = {}
+    all_scores.update(panel_a)
+    all_scores.update(panel_b)
+    all_scores.update(panel_c)
+
+    matches = []
+
+    for item in all_scores.values():
+        if item["score"] < RICH_V28_MIN_PUBLIC_SCORE:
+            continue
+
+        if not item.get("evidence_ids"):
+            continue
+
+        if _v28_has_contradiction(item):
+            print(
+                f"Rich v28 contradiction guard dropped "
+                f"{item['advisor_id']}.",
+                flush=True,
+            )
+            continue
+
+        matches.append(item)
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    matches = _v21_repair_reasons(matches)
+
+    print(
+        f"Rich v28 final pool: {len(matches)} advisors with "
+        f"score >= {RICH_V28_MIN_PUBLIC_SCORE:.2f}.",
+        flush=True,
+    )
+
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
 RUNS = {
     "base": {
         "config": f"{ROOT}/configs/base_config.yaml",
@@ -8368,7 +8760,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v27(
+        return advisory_match_rich_v28(
             job_input
         )
 

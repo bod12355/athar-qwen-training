@@ -3291,43 +3291,53 @@ RICH_V18_DESIRED_CHOICE_POOL_MIN = int(
     os.environ.get("RICH_V18_DESIRED_CHOICE_POOL_MIN", "7")
 )
 
-RICH_V18_THEME_PROMPT = """أنت Athar OS Advisory Theme Discovery Engine v19.
+RICH_V18_THEME_PROMPT = """أنت Athar OS Advisory Theme Discovery Engine v20.
 
 ستستلم FACTS فقط عن الجمعية وبرامجها. لا ترى أي مستشارين في هذه المرحلة.
 
-استخرج كل "Advisory Theme" مادي يمكن أن تحتاج الجمعية فيه إلى استشارة الآن.
-الثيم قد يكون:
-- EXPLICIT_NEED: فجوة/مشكلة/مخاطرة/هدف تحسين مذكور.
-- OPERATIONAL_COMPLEXITY: تعقيد حقيقي ناتج عن كثرة البرامج أو المواسم أو الموارد أو الاعتماديات.
-- STRATEGIC_OPPORTUNITY: فرصة قرار/مواءمة/ترتيب أولويات واضحة من الوقائع.
-- SUSTAINMENT_OPPORTUNITY: إنجاز أو تحول قائم يحتاج تثبيتًا/تكاملًا/تحسينًا مستمرًا، دون الادعاء بوجود فشل.
+استخرج كل Advisory Theme مادي ومثبت يمكن أن يستخدم لاحقًا في ترشيح المستشارين.
+الثيمات خمسة أنواع فقط:
 
-مهم جدًا:
+EXPLICIT_NEED
+= فجوة أو مشكلة أو مخاطرة أو هدف تحسين مذكور بوضوح.
+
+OPERATIONAL_COMPLEXITY
+= تعقيد حقيقي ظاهر مثل كثرة البرامج، المواسم، الاعتماديات، الموارد أو تعدد مسارات التنفيذ.
+
+STRATEGIC_OPPORTUNITY
+= قرار أو مفاضلة أو توسع أو تغيير اتجاه يحتاج قرارًا استراتيجيًا فعليًا.
+
+SUSTAINMENT_OPPORTUNITY
+= إنجاز أو قدرة قائمة تمر بتوسع/تحول/تكامل ملموس يحتاج تثبيتًا أو تطويرًا محددًا. مجرد الحفاظ على شيء جيد لا يكفي.
+
+SECTOR_PORTFOLIO
+= مجال قطاعي جوهري ومتكرر في أعمال الجمعية أو أهدافها، بحيث تكون الخبرة القطاعية المتخصصة ذات قيمة مباشرة في مراجعة أو تطوير البرامج الحالية حتى دون وجود مشكلة.
+
+قواعد شديدة الأهمية:
 - لا تحول الإنجاز إلى مشكلة.
-- يجوز أن تقول "فرصة لتثبيت/استثمار/توسيع قيمة إنجاز قائم" إذا كان ذلك منطقيًا وماديًا.
-- لا تستخدم "قد يحتاج" أو "ربما".
-- لا تفترض شراكات أو مخاطر أو أثر أو KPI أو حوكمة أو تغيير إذا لم تعط الوقائع أساسًا ماديًا لها.
-- لا تكرر نفس الفكرة بصيغ مختلفة.
-- الثيم يجب أن يكون محددًا بما يكفي ليُسند لاحقًا إلى مستشار أو أكثر.
-- استخرج جميع الثيمات الحقيقية، وليس أقل عدد ممكن.
+- وجود رؤية ورسالة واضحتين ليس احتياج هوية.
+- وجود أهداف استراتيجية واضحة ليس احتياجًا لإعادة صياغة الأهداف.
+- وجود درجة حوكمة مرتفعة ليس احتياج حوكمة.
+- وجود مؤشرات وأرقام ليس وحده احتياجًا لبناء KPI أو Dashboard.
+- وجود برامج قائمة ليس وحده احتياجًا لإعادة تصميم المبادرات.
+- لا تعتبر كل نشاط موسمي مخاطرة أو كل شراكة مشكلة.
+- SECTOR_PORTFOLIO يستخدم فقط عندما يكون المجال جزءًا ماديًا من رسالة الجمعية أو محفظة برامجها أو أهدافها، وليس فعالية عابرة واحدة.
+- استخرج جميع الثيمات الحقيقية، ولا تبحث عن حد أدنى أو أقصى للعدد.
 
-أمثلة مقبولة:
-- تنوع محفظة البرامج يخلق حاجة لترتيب الأولويات والاعتماديات وتخصيص الموارد.
-- البرامج الموسمية والمتنوعة تخلق حاجة لتنسيق الخطط والجداول والموارد.
-- تنفيذ إعادة هيكلة ونظام ERP وسياسات جديدة يخلق فرصة مادية لتثبيت التكامل المؤسسي وقياس الاستفادة من التحول، دون افتراض وجود مقاومة.
-- وجود خدمات صحية واجتماعية وتعليمية متعددة قد يخلق فرصة لتوحيد معايير جودة الخدمة فقط إذا كانت الوقائع تدعم تنوع طرق التقديم والحاجة للاتساق.
-
-أمثلة غير مقبولة:
-- ERP يعني وجود مشكلة تغيير.
-- درجة حوكمة عالية تعني فجوة حوكمة.
-- وجود برامج يعني تلقائيًا قياس أثر.
-- وجود إيرادات يعني تلقائيًا شراكات.
-- كبر الجمعية يعني تلقائيًا تخطيط استراتيجي.
+أمثلة:
+- 61 برنامجًا عبر عدة مسارات = OPERATIONAL_COMPLEXITY لإدارة المحفظة والتنسيق التشغيلي.
+- 9 شراكات يعتمد عليها تنفيذ خدمات متعددة = SUSTAINMENT_OPPORTUNITY لإدارة محفظة الشراكات والقيمة المتبادلة، إذا كان الاعتماد على الشركاء ظاهرًا.
+- برامج صحية متكررة لكبار السن = SECTOR_PORTFOLIO للصحة.
+- خدمات اجتماعية مستمرة لكبار السن = SECTOR_PORTFOLIO للخدمات الاجتماعية.
+- هدف صريح لإجراء بحوث ودراسات + برامج تعليمية = SECTOR_PORTFOLIO للتعليم والبحث.
+- هدف صريح لدعم حقوق كبار السن والتوعية بها = SECTOR_PORTFOLIO للحقوق والمناصرة.
+- قاعدة تطوع كبيرة وفرص تطوعية متعددة = SECTOR_PORTFOLIO للعمل التطوعي.
+- برامج ثقافية وترفيهية متكررة = SECTOR_PORTFOLIO للثقافة والترفيه إذا كانت مادية ضمن المحفظة.
 
 أخرج:
 THEME_ID|TYPE|PRIORITY|EVIDENCE_IDS|THEME
 
-TYPE = EXPLICIT_NEED أو OPERATIONAL_COMPLEXITY أو STRATEGIC_OPPORTUNITY أو SUSTAINMENT_OPPORTUNITY
+TYPE = EXPLICIT_NEED أو OPERATIONAL_COMPLEXITY أو STRATEGIC_OPPORTUNITY أو SUSTAINMENT_OPPORTUNITY أو SECTOR_PORTFOLIO
 PRIORITY = high أو medium أو low
 EVIDENCE_IDS من FACTS فقط، 1-4
 THEME جملة عربية واضحة ومحددة
@@ -3336,24 +3346,26 @@ THEME جملة عربية واضحة ومحددة
 ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
 """
 
-RICH_V18_THEME_REVIEW_PROMPT = """أنت Athar OS Advisory Theme Validator v19.
+RICH_V18_THEME_REVIEW_PROMPT = """أنت Athar OS Advisory Theme Validator v20.
 
 راجع CANDIDATE_THEMES مقابل FACTS فقط. لا ترى المستشارين.
 
-KEEP إذا:
-- الثيم مدعوم مباشرة بالوقائع، أو
-- استنتاجه قريب ومادي من تعقيد ظاهر، أو
-- هو فرصة تثبيت/استثمار لإنجاز قائم دون اختراع فشل.
+KEEP إذا كان الثيم:
+- مدعومًا مباشرة بالوقائع، أو
+- استنتاجًا قريبًا وماديًا من تعقيد ظاهر، أو
+- فرصة تطوير مرتبطة بتوسع/تحول/قرار ملموس، أو
+- SECTOR_PORTFOLIO جوهريًا ومتكررًا في رسالة الجمعية أو برامجها أو أهدافها.
 
 DROP إذا:
 - يحتاج افتراضًا إضافيًا غير موجود.
 - يحول إنجازًا إلى مشكلة.
 - مجرد مجال عام مفيد.
-- يكرر ثيمًا آخر بدون إضافة مادية.
-- يعتمد على كلمات مثل "قد يحتاج/ربما" بدل دليل.
+- يكرر ثيمًا آخر دون إضافة مادية.
+- يبني احتياجًا وظيفيًا فقط لأن الجمعية لديها إنجاز قائم.
+- يعتبر الهوية الواضحة سببًا لمستشار هوية، أو الأهداف الواضحة سببًا لمستشار أهداف، أو درجة الحوكمة العالية سببًا لمستشار حوكمة، أو وجود أرقام سببًا تلقائيًا لمستشار KPI.
 
-مهم:
-SUSTAINMENT_OPPORTUNITY يمكن أن تكون صحيحة حتى بدون مشكلة، لكن يجب أن يكون لها مخرج استشاري مادي واضح مرتبط بوقائع قائمة.
+بالنسبة لـ SECTOR_PORTFOLIO:
+KEEP فقط إذا كان القطاع جزءًا ماديًا من العمل المتكرر أو الهدف المؤسسي، وليس ذكرًا جانبيًا أو فعالية عابرة.
 
 أخرج لكل ثيم:
 THEME_ID|KEEP_OR_DROP|PRIORITY|EVIDENCE_IDS|REASON
@@ -3366,84 +3378,93 @@ REASON سبب عربي واضح للمراجعة
 ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
 """
 
-RICH_V18_THEME_EXPAND_PROMPT = """أنت Athar OS Advisory Theme Coverage Reviewer.
+RICH_V18_THEME_EXPAND_PROMPT = """أنت Athar OS Advisory Theme Coverage Reviewer v20.
 
-لديك FACTS وVALIDATED_THEMES الحالية.
-القائمة الحالية أنتجت Candidate Pool أقل من 7، والجمعية ستختار 6 لاحقًا.
+لديك FACTS وVALIDATED_THEMES الحالية، والقائمة الحالية لم تنتج Candidate Pool واسعًا كفاية لاختيار 6 مستشارين.
 
-لا تبحث عن مستشارين ولا تعرف أسماءهم.
-ابحث فقط عن ثيمات/فرص استشارية مادية أخرى فاتت الجولة الأولى، إن كانت الوقائع تدعمها فعلًا.
-
-يجوز اكتشاف:
-- فرص تثبيت وتحسين إنجازات مؤسسية قائمة.
-- فرص مواءمة استراتيجية ناتجة عن تعدد البرامج وتغير نموذج العمل.
-- فرص جودة/أداء/تكامل إذا كان لها أساس فعلي في البيانات.
-- احتياجات تنسيق أو قرار أو إدارة موارد.
+لا تبحث عن أسماء مستشارين.
+ابحث فقط عن ثيمات حقيقية فاتت الجولة الأولى، وخاصة:
+- تعقيد تشغيلي أو محفظي مثبت.
+- شراكات جوهرية يعتمد عليها تنفيذ الخدمات.
+- قطاعات مادية ومتكررة ضمن البرامج والأهداف مثل الصحة، الخدمات الاجتماعية، التعليم والبحث، الثقافة، الحقوق، التطوع، البيئة، الإسكان أو غيرها.
+- فرص توسع أو تغيير حقيقية.
 
 ممنوع:
 - اختراع فجوة للوصول إلى عدد أكبر.
+- تحويل الإنجاز إلى مشكلة.
+- اعتبار الهوية/الحوكمة/الأهداف/المؤشرات الحالية احتياجًا لمجرد وجودها.
 - تكرار VALIDATED_THEMES.
-- افتراض Impact/KPI/Governance/Change/Risk/Partnerships دون أساس مادي.
 
 أخرج الثيمات الإضافية فقط:
 THEME_ID|TYPE|PRIORITY|EVIDENCE_IDS|THEME
 
+TYPE = EXPLICIT_NEED أو OPERATIONAL_COMPLEXITY أو STRATEGIC_OPPORTUNITY أو SUSTAINMENT_OPPORTUNITY أو SECTOR_PORTFOLIO
 إذا لا توجد ثيمات إضافية حقيقية اكتب NONE.
 ممنوع JSON وممنوع Markdown وممنوع شرح إضافي.
 """
 
-RICH_V18_MATCH_PROMPT = """أنت Athar OS Global Advisor Relevance Engine v19.
+RICH_V18_MATCH_PROMPT = """أنت Athar OS Global Advisor Relevance Engine v20.
 
 ستستلم:
 1) FACTS موثقة.
 2) VALIDATED_THEMES تم اكتشافها والتحقق منها قبل رؤية المستشارين.
-3) ROUTING_CARDS للـ35 مستشارًا، وكل بطاقة لها system_code وهو الهوية الوحيدة المسموح باستخدامها.
+3) ROUTING_CARDS للـ35 مستشارًا.
 
-مهمتك تقييم الـ35 جميعًا عالميًا وباستقلالية.
-لا يوجد Target Count هنا. لا تقلل العدد ولا تكبره.
-أخرج كل مستشار مرتبط فعلاً بثيم واحد أو أكثر، واستبعد القرب العام.
+كل بطاقة تحتوي advisor_class:
+FUNCTIONAL = المستشارون 1-25.
+SECTOR = المستشارون 26-35.
+
+مهمتك تقييم الـ35 جميعًا عالميًا. لا يوجد Target Count. العدد نتيجة الأدلة فقط.
+
+قاعدة الترشيح تختلف حسب الفئة:
+
+أولًا — FUNCTIONAL
+لا ترشح مستشارًا وظيفيًا إلا إذا كان هناك احتياج/قرار/تعقيد/فرصة تطوير حالية تتطلب Owned Outcome الخاص به.
+مجرد وجود قدرة أو إنجاز في مجاله لا يكفي.
+
+أمثلة منع ملزمة:
+- رؤية ورسالة واضحتان لا تفعّلان AOS-SP-09.
+- أهداف استراتيجية واضحة لا تفعّل AOS-SP-10 إلا إذا كانت تحتاج مراجعة/إعادة بناء فعلية.
+- وجود استراتيجية وأهداف لا يفعّل AOS-SP-08 دون مفاضلة أو تحديث أو قرار استراتيجي حقيقي.
+- درجة حوكمة مرتفعة لا تفعّل AOS-FG-16 دون فجوة امتثال/صلاحيات/سياسات/حوكمة حالية.
+- وجود أرقام أو نتائج لا يفعّل AOS-SP-14 دون احتياج حقيقي لنظام KPI/مستهدفات/لوحة/تعريفات أداء.
+- وجود برامج لا يفعّل AOS-SP-11 دون تصميم مبادرة جديدة أو إعادة تصميم قائمة.
+- وجود برامج ناجحة لا يفعّل AOS-SP-15 دون احتياج فعلي للتقييم/الأثر/التعلم أو قرار توسع مبني على الدليل.
+
+أمثلة إيجابية:
+- محفظة كبيرة من البرامج وتنافس الموارد/الأولويات يمكن أن تفعّل AOS-SP-13.
+- برامج كثيرة ومتكررة وموسمية تحتاج تنسيقًا للمخرجات والموارد والمواعيد يمكن أن تفعّل AOS-SP-12.
+- شبكة شراكات كبيرة يعتمد عليها تنفيذ خدمات متعددة يمكن أن تفعّل AOS-LD-04 إذا كان المطلوب إدارة قيمة الشراكات ومحفظتها، وليس مجرد التواصل معها.
+
+ثانيًا — SECTOR
+يمكن ترشيح المستشار القطاعي عندما يوجد SECTOR_PORTFOLIO جوهري أو هدف قطاعي صريح، حتى لو لم توجد مشكلة.
+لكن يجب أن يكون القطاع ماديًا ومتكررًا، وأن يضيف المستشار ذكاءً قطاعيًا محددًا للبرامج الحالية.
+
+أمثلة:
+- برامج صحية متكررة لكبار السن => AOS-SE-28.
+- خدمات اجتماعية ورعاية كبار السن => AOS-SE-29.
+- هدف بحثي/تعليمي أو برامج تعليمية جوهرية => AOS-SE-27.
+- برامج ثقافية وترفيهية متكررة => AOS-SE-26 إذا كانت مادية.
+- دعم حقوق الفئة والتوعية بالحقوق => AOS-SE-32.
+- منظومة تطوع وفرص ومتطوعون بأعداد مادية => AOS-SE-33.
+
+قاعدة حدود التخصص:
+- AOS-SE-33 إذا اختير بسبب التطوع، يجب أن يكون السبب عن منظومة التطوع/رحلة المتطوع/قيمة التطوع، وليس تصميم الشراكات؛ تصميم الشراكات يخص AOS-LD-04.
+- AOS-FG-16 لا يملك تحسين الشراكات.
+- AOS-SP-14 يقيس الأداء ولا يملك قياس الأثر السببي؛ الأثر لـ AOS-SP-15.
+- لا تنسب أي مخرج لمستشار لا يملكه في ROUTING_CARD.
 
 تصنيفات الصلة:
-DIRECT
-= يملك الثيم أو مخرجًا محوريًا داخله مباشرة.
-
-COMPLEMENTARY
-= يضيف مخرجًا مستقلًا وماديًا مختلفًا عن المالك المباشر لنفس الثيم.
-
-RELEVANT_OPTION
-= له قيمة استشارية حقيقية ومسنودة في الثيم، لكنها أقل مركزية.
-
-ADJACENT
-= قريب من الموضوع لكنه لا يقدم مخرجًا مستقلًا مطلوبًا.
-
-UNRELATED
-= لا صلة حقيقية.
+DIRECT = يملك المخرج المحوري المطلوب.
+COMPLEMENTARY = يضيف مخرجًا مستقلًا وماديًا مختلفًا.
+RELEVANT_OPTION = قيمة حقيقية لكنها أقل مركزية.
+ADJACENT = قريب فقط، لا تخرجه.
+UNRELATED = لا تخرجه.
 
 أخرج فقط DIRECT + COMPLEMENTARY + RELEVANT_OPTION.
 
-قواعد:
-- استخدم system_code حرفيًا من البطاقة. ممنوع تحويله إلى رقم.
-- اقرأ advisor_name وowned_outcome وactivation_when وnot_primary_when وboundaries قبل الحكم.
-- لا تنسب للمستشار تخصص مستشار آخر.
-- لا تخترع Theme جديدًا.
-- لا يكفي أن تقول "يمكنه المساعدة".
-- يجب أن تذكر مساهمته المحددة في الثيم.
-- يمكن أن يكون أكثر من مستشار مرتبطًا بنفس الثيم إذا اختلفت مساهمتهم ماديًا.
-- لا تطبق Minimum Expert Principle.
-- العدد النهائي نتيجة للأدلة فقط.
-
-أمثلة هوية مهمة:
-AOS-LD-02 = التشخيص والنضج المؤسسي، وليس التخطيط التشغيلي.
-AOS-SP-09 = الهوية والرؤية والرسالة والقيم.
-AOS-SP-10 = الأهداف والقضايا الاستراتيجية.
-AOS-SP-11 = تصميم المبادرات الاستراتيجية.
-AOS-SP-12 = التخطيط التشغيلي.
-AOS-SP-13 = المحافظ والبرامج والمشاريع.
-AOS-SP-14 = مؤشرات الأداء ولوحات القيادة.
-AOS-SP-15 = MEAL وقياس الأثر.
-
 SCORE:
-90-100 = DIRECT محوري
+90-100 = DIRECT محوري جدًا
 80-89 = DIRECT/COMPLEMENTARY قوي
 70-79 = COMPLEMENTARY واضح
 55-69 = RELEVANT_OPTION مادي
@@ -3452,10 +3473,10 @@ SCORE:
 
 REASON:
 - 30 إلى 55 كلمة عربية.
-- اذكر الثيم/الواقعة التي تربطه بالجمعية.
-- اشرح المخرج أو القيمة المحددة التي يقدمها.
-- اشرح لماذا هذه المساهمة مختلفة عن مجرد مساعدة عامة.
-- ممنوع الأسباب القصيرة من نوع "لديه خبرة في...".
+- اذكر الوقائع/الثيم الذي يربطه بالجمعية.
+- اشرح المخرج المحدد الذي يقدمه هذا المستشار تحديدًا.
+- لا تقل فقط "لديها برامج إذن تحتاج المستشار".
+- لا تختلق فجوة غير موجودة.
 
 أخرج:
 SYSTEM_CODE|RELATION|SCORE|THEME_IDS|EVIDENCE_IDS|REASON
@@ -3551,6 +3572,7 @@ def _parse_v18_themes(text, valid_fact_ids):
         "OPERATIONAL_COMPLEXITY",
         "STRATEGIC_OPPORTUNITY",
         "SUSTAINMENT_OPPORTUNITY",
+        "SECTOR_PORTFOLIO",
     }
 
     themes = []
@@ -3735,24 +3757,32 @@ def _parse_v18_theme_review(
 
 
 def _v18_routing_cards(advisors):
-    """Build compact routing-only cards so all 35 advisors fit in one global comparison."""
+    """Build compact but complete routing cards for all 35 advisors."""
 
     cards = []
 
     for advisor in advisors:
+        advisor_num = int(advisor.get("advisor_id"))
+        advisor_class = (
+            "SECTOR"
+            if advisor_num >= 26
+            else "FUNCTIONAL"
+        )
+
         cards.append({
             "system_code": advisor.get("system_code"),
             "advisor_name": advisor.get(
                 "name_ar",
                 advisor.get("name_en"),
             ),
+            "advisor_class": advisor_class,
             "group": advisor.get("group"),
             "mission": advisor.get("mission"),
             "owned_outcome": advisor.get("owned_outcome"),
-            "owns": (advisor.get("owns") or [])[:6],
-            "activation_when": (advisor.get("activation_when") or [])[:7],
-            "not_primary_when": (advisor.get("not_primary_when") or [])[:4],
-            "boundaries": (advisor.get("boundaries") or [])[:3],
+            "owns": (advisor.get("owns") or [])[:10],
+            "activation_when": (advisor.get("activation_when") or [])[:10],
+            "not_primary_when": (advisor.get("not_primary_when") or [])[:6],
+            "boundaries": (advisor.get("boundaries") or [])[:5],
         })
 
     return cards
@@ -3892,7 +3922,7 @@ def _parse_v18_matches(
     return matches
 
 
-def advisory_match_rich_v19(job_input):
+def advisory_match_rich_v20(job_input):
     organization, programs = normalize_advisory_input(
         job_input.get("input", {})
     )
@@ -3916,7 +3946,7 @@ def advisory_match_rich_v19(job_input):
 
     # Pass 1: grounded needs + opportunities, without advisors.
     print(
-        "Rich v19 pass 1: discovering grounded advisory themes...",
+        "Rich v20 pass 1: discovering grounded advisory themes...",
         flush=True,
     )
 
@@ -3933,7 +3963,7 @@ def advisory_match_rich_v19(job_input):
 
     # Pass 2: validate themes, still without advisors.
     print(
-        f"Rich v19 pass 2: validating {len(candidate_themes)} themes...",
+        f"Rich v20 pass 2: validating {len(candidate_themes)} themes...",
         flush=True,
     )
 
@@ -3961,7 +3991,7 @@ def advisory_match_rich_v19(job_input):
     # Pass 3: global match using system_code identities.
     if validated_themes:
         print(
-            f"Rich v19 pass 3: matching 35 advisors to {len(validated_themes)} validated themes...",
+            f"Rich v20 pass 3: matching 35 advisors to {len(validated_themes)} validated themes...",
             flush=True,
         )
 
@@ -4003,7 +4033,7 @@ def advisory_match_rich_v19(job_input):
         and validated_themes
     ):
         print(
-            f"Rich v19 pass 4: pool has {len(matches)} advisors; "
+            f"Rich v20 pass 4: pool has {len(matches)} advisors; "
             "searching for overlooked grounded themes, not forcing advisors...",
             flush=True,
         )
@@ -4102,13 +4132,480 @@ def advisory_match_rich_v19(job_input):
 
     if len(matches) < RICH_V18_DESIRED_CHOICE_POOL_MIN:
         print(
-            "Rich v19 warning: grounded data supports fewer than the desired "
+            "Rich v20 warning: grounded data supports fewer than the desired "
             f"{RICH_V18_DESIRED_CHOICE_POOL_MIN} advisor choices. "
             "Returning only genuinely related advisors instead of fabricating relevance.",
             flush=True,
         )
 
     # Exact public contract requested by the application.
+    return {
+        "ranked": [
+            {
+                "advisor_id": item["advisor_id"],
+                "score": item["score"],
+                "reason": item["reason"],
+            }
+            for item in matches
+        ]
+    }
+
+
+# ---------------------------------------------------------------------
+# Rich AI Router v21 — Arabic-only public language
+#
+# Guarantees:
+# - advisor_id remains the registered system code (e.g. AOS-SE-28).
+# - Public "reason" text must contain Arabic letters only (plus numbers
+#   and punctuation).
+# - Latin/Cyrillic/CJK/Greek/etc. letters are detected.
+# - If contamination appears, ONE short repair pass rewrites reasons only.
+# - A strict sanitizer is still applied as a final safety net.
+# ---------------------------------------------------------------------
+
+import unicodedata
+
+RICH_V21_LANGUAGE_REPAIR_MAX_NEW_TOKENS = int(
+    os.environ.get("RICH_V21_LANGUAGE_REPAIR_MAX_NEW_TOKENS", "1100")
+)
+
+RICH_V21_ARABIC_RULES = """
+قواعد اللغة الإلزامية:
+- كل النصوص الوصفية التي تولدها يجب أن تكون باللغة العربية فقط.
+- ممنوع استخدام أي حروف إنجليزية أو روسية أو صينية أو يابانية أو كورية أو يونانية أو أي أبجدية غير عربية داخل النص الوصفي.
+- استخدم المقابل العربي للمصطلحات الأجنبية بدل كتابتها بحروف لاتينية.
+- يجوز فقط للحقول البروتوكولية الثابتة مثل SYSTEM_CODE وTHEME_ID وEVIDENCE_IDS وRELATION وTYPE أن تبقى بالصيغة المحددة في التعليمات.
+- حقل REASON وحقل THEME وأسباب المراجعة يجب أن تكون حروفها عربية بالكامل.
+- إذا احتجت إلى ذكر نظام أو تقنية أجنبية، اكتب وصفها العربي فقط، مثل: نظام تخطيط موارد المؤسسة، ولا تكتب الاسم الأجنبي.
+"""
+
+# Strengthen every generation stage, while keeping protocol tokens intact.
+RICH_V18_THEME_PROMPT = RICH_V18_THEME_PROMPT + "\n" + RICH_V21_ARABIC_RULES
+RICH_V18_THEME_REVIEW_PROMPT = RICH_V18_THEME_REVIEW_PROMPT + "\n" + RICH_V21_ARABIC_RULES
+RICH_V18_THEME_EXPAND_PROMPT = RICH_V18_THEME_EXPAND_PROMPT + "\n" + RICH_V21_ARABIC_RULES
+RICH_V18_MATCH_PROMPT = RICH_V18_MATCH_PROMPT + """
+\nقواعد إضافية خاصة بحقل REASON:
+- REASON يجب أن يكون عربيًا خالصًا من 30 إلى 55 كلمة.
+- لا تستخدم اختصارات أو كلمات أجنبية داخل REASON.
+- لا تكتب أسماء النماذج أو الأطر الإنجليزية داخل REASON.
+- استخدم صياغة عربية طبيعية ومهنية وخالية من الحروف الدخيلة.
+""" + "\n" + RICH_V21_ARABIC_RULES
+
+
+RICH_V21_REASON_REPAIR_PROMPT = """أنت مدقق لغوي عربي لمنظومة أثر.
+
+ستستلم قائمة أسباب ترشيح جاهزة ومثبتة لمستشارين.
+مهمتك لغوية فقط، ولا يجوز تغيير:
+- المستشار المختار.
+- درجة الملاءمة.
+- معنى السبب.
+- الوقائع أو الادعاءات.
+- قوة العلاقة.
+
+أعد صياغة كل سبب بلغة عربية سليمة وواضحة فقط.
+
+قواعد إلزامية:
+- ممنوع وجود أي حرف غير عربي داخل السبب.
+- لا تستخدم الإنجليزية أو الروسية أو الصينية أو اليابانية أو الكورية أو اليونانية أو أي أبجدية أخرى.
+- استخدم مقابلات عربية للمصطلحات الأجنبية.
+- أصلح أي أحرف دخيلة ظهرت داخل كلمة عربية.
+- حافظ على السبب بين 30 و55 كلمة قدر الإمكان.
+- لا تضف معلومة جديدة.
+- لا تغير الترتيب.
+
+أخرج سطرًا لكل مستشار فقط:
+SYSTEM_CODE|REASON
+
+SYSTEM_CODE يبقى كما هو لأنه رمز تقني مسجل.
+REASON عربي فقط.
+ممنوع JSON وممنوع Markdown وممنوع أي شرح إضافي.
+"""
+
+
+def _v21_contains_non_arabic_letters(text):
+    """
+    True if text contains a Unicode letter that is not Arabic-script.
+    Digits, whitespace and punctuation are allowed.
+    """
+    for ch in str(text):
+        if not ch.isalpha():
+            continue
+
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            return True
+
+        if "ARABIC" not in name:
+            return True
+
+    return False
+
+
+def _v21_arabic_only_sanitize(text):
+    """
+    Final hard safety net:
+    preserve Arabic letters, combining marks, digits, spaces and punctuation;
+    remove letters from every other script.
+    """
+    out = []
+
+    for ch in str(text):
+        category = unicodedata.category(ch)
+
+        if category.startswith("L"):
+            try:
+                name = unicodedata.name(ch)
+            except ValueError:
+                name = ""
+
+            if "ARABIC" in name:
+                out.append(ch)
+            else:
+                out.append(" ")
+            continue
+
+        # Keep Arabic diacritics/combining marks, digits, spaces and punctuation.
+        if category.startswith("M"):
+            try:
+                name = unicodedata.name(ch)
+            except ValueError:
+                name = ""
+            if "ARABIC" in name:
+                out.append(ch)
+            continue
+
+        if (
+            category.startswith("N")
+            or category.startswith("P")
+            or category.startswith("Z")
+        ):
+            out.append(ch)
+            continue
+
+        # Common harmless symbols used in Arabic prose.
+        if ch in {"٪", "﷼"}:
+            out.append(ch)
+        else:
+            out.append(" ")
+
+    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
+    cleaned = re.sub(r"\s+([،؛:,.!?؟])", r"\1", cleaned)
+
+    return cleaned
+
+
+def _v21_repair_reasons(matches):
+    if not matches:
+        return matches
+
+    contaminated = [
+        item
+        for item in matches
+        if _v21_contains_non_arabic_letters(item.get("reason", ""))
+    ]
+
+    if not contaminated:
+        # Still apply the final safety net.
+        for item in matches:
+            item["reason"] = _v21_arabic_only_sanitize(
+                item.get("reason", "")
+            )
+        return matches
+
+    print(
+        f"Rich v21 language guard: repairing {len(contaminated)} "
+        "reason(s) containing non-Arabic letters...",
+        flush=True,
+    )
+
+    payload = {
+        "items": [
+            {
+                "advisor_id": item["advisor_id"],
+                "reason": item["reason"],
+            }
+            for item in contaminated
+        ]
+    }
+
+    try:
+        repaired_raw, _ = _v18_generate_text(
+            RICH_V21_REASON_REPAIR_PROMPT,
+            payload,
+            RICH_V21_LANGUAGE_REPAIR_MAX_NEW_TOKENS,
+        )
+
+        repaired_by_code = {}
+
+        for raw_line in str(repaired_raw).splitlines():
+            line = raw_line.strip()
+
+            if not line or "|" not in line:
+                continue
+
+            code, reason = line.split("|", 1)
+            code = code.strip()
+            reason = re.sub(r"\s+", " ", reason).strip()
+
+            if not code or not reason:
+                continue
+
+            # Accept only repair text that is itself Arabic-only.
+            if _v21_contains_non_arabic_letters(reason):
+                continue
+
+            repaired_by_code[code] = reason
+
+        for item in matches:
+            code = item["advisor_id"]
+
+            if code in repaired_by_code:
+                item["reason"] = repaired_by_code[code]
+
+    except Exception as exc:
+        print(
+            f"Rich v21 language repair pass failed; "
+            f"using strict sanitizer fallback: {exc}",
+            flush=True,
+        )
+
+    # Absolute output guarantee even if the repair model failed.
+    for item in matches:
+        cleaned = _v21_arabic_only_sanitize(
+            item.get("reason", "")
+        )
+
+        # Avoid an empty public reason after sanitisation.
+        if not cleaned:
+            cleaned = (
+                "ترتبط خبرة هذا المستشار مباشرة باحتياج موثق في بيانات الجمعية، "
+                "ويقدم مساهمة تخصصية واضحة تدعم تحسين القرار والتنفيذ ضمن نطاق اختصاصه."
+            )
+
+        item["reason"] = cleaned
+
+    return matches
+
+
+def advisory_match_rich_v21(job_input):
+    organization, programs = normalize_advisory_input(
+        job_input.get("input", {})
+    )
+
+    ensure_rich_router_model()
+
+    facts = build_rich_facts(
+        organization,
+        programs,
+    )
+
+    valid_fact_ids = {
+        f["fact_id"]
+        for f in facts
+    }
+
+    advisors = _RICH_REGISTRY["advisors"]
+    routing_cards = _v18_routing_cards(
+        advisors
+    )
+
+    print(
+        "Rich v21 pass 1: discovering grounded advisory themes...",
+        flush=True,
+    )
+
+    themes_raw, themes_tokens = _v18_generate_text(
+        RICH_V18_THEME_PROMPT,
+        {"facts": facts},
+        RICH_V18_THEME_MAX_NEW_TOKENS,
+    )
+
+    candidate_themes = _parse_v18_themes(
+        themes_raw,
+        valid_fact_ids,
+    )
+
+    print(
+        f"Rich v21 pass 2: validating {len(candidate_themes)} themes...",
+        flush=True,
+    )
+
+    if candidate_themes:
+        review_raw, review_tokens = _v18_generate_text(
+            RICH_V18_THEME_REVIEW_PROMPT,
+            {
+                "facts": facts,
+                "candidate_themes": candidate_themes,
+            },
+            RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS,
+        )
+
+        validated_themes, theme_decisions = _parse_v18_theme_review(
+            review_raw,
+            candidate_themes,
+            valid_fact_ids,
+        )
+    else:
+        review_raw = "NONE"
+        review_tokens = 0
+        validated_themes = []
+        theme_decisions = {}
+
+    if validated_themes:
+        print(
+            f"Rich v21 pass 3: matching 35 advisors to "
+            f"{len(validated_themes)} validated themes...",
+            flush=True,
+        )
+
+        match_raw, match_tokens = _v18_generate_text(
+            RICH_V18_MATCH_PROMPT,
+            {
+                "facts": facts,
+                "validated_themes": validated_themes,
+                "routing_cards": routing_cards,
+            },
+            RICH_V18_MATCH_MAX_NEW_TOKENS,
+        )
+
+        matches = _parse_v18_matches(
+            match_raw,
+            {
+                card["system_code"]
+                for card in routing_cards
+                if card.get("system_code")
+            },
+            {
+                theme["theme_id"]
+                for theme in validated_themes
+            },
+            valid_fact_ids,
+        )
+    else:
+        match_raw = "NONE"
+        match_tokens = 0
+        matches = []
+
+    expansion_raw = "NONE"
+    expansion_tokens = 0
+
+    if (
+        len(matches) < RICH_V18_DESIRED_CHOICE_POOL_MIN
+        and validated_themes
+    ):
+        print(
+            f"Rich v21 pass 4: pool has {len(matches)} advisors; "
+            "searching for overlooked grounded themes...",
+            flush=True,
+        )
+
+        expansion_raw, expansion_tokens = _v18_generate_text(
+            RICH_V18_THEME_EXPAND_PROMPT,
+            {
+                "facts": facts,
+                "validated_themes": validated_themes,
+            },
+            RICH_V18_THEME_EXPAND_MAX_NEW_TOKENS,
+        )
+
+        extra_candidates = _parse_v18_themes(
+            expansion_raw,
+            valid_fact_ids,
+        )
+
+        existing_texts = {
+            t["theme"].strip().lower()
+            for t in validated_themes
+        }
+
+        filtered_extras = []
+
+        next_theme_number = (
+            max(
+                [
+                    int(
+                        re.search(
+                            r"\d+",
+                            t["theme_id"],
+                        ).group()
+                    )
+                    for t in validated_themes
+                ],
+                default=0,
+            )
+            + 1
+        )
+
+        for item in extra_candidates:
+            if item["theme"].strip().lower() in existing_texts:
+                continue
+
+            item = dict(item)
+            item["theme_id"] = f"T{next_theme_number}"
+            next_theme_number += 1
+            filtered_extras.append(item)
+
+        if filtered_extras:
+            extra_review_raw, extra_review_tokens = _v18_generate_text(
+                RICH_V18_THEME_REVIEW_PROMPT,
+                {
+                    "facts": facts,
+                    "candidate_themes": filtered_extras,
+                },
+                RICH_V18_THEME_REVIEW_MAX_NEW_TOKENS,
+            )
+
+            extra_validated, _ = _parse_v18_theme_review(
+                extra_review_raw,
+                filtered_extras,
+                valid_fact_ids,
+            )
+
+            if extra_validated:
+                validated_themes = (
+                    validated_themes
+                    + extra_validated
+                )
+
+                rematch_raw, rematch_tokens = _v18_generate_text(
+                    RICH_V18_MATCH_PROMPT,
+                    {
+                        "facts": facts,
+                        "validated_themes": validated_themes,
+                        "routing_cards": routing_cards,
+                    },
+                    RICH_V18_MATCH_MAX_NEW_TOKENS,
+                )
+
+                rematches = _parse_v18_matches(
+                    rematch_raw,
+                    {
+                        card["system_code"]
+                        for card in routing_cards
+                        if card.get("system_code")
+                    },
+                    {
+                        theme["theme_id"]
+                        for theme in validated_themes
+                    },
+                    valid_fact_ids,
+                )
+
+                if len(rematches) >= len(matches):
+                    matches = rematches
+
+    if len(matches) < RICH_V18_DESIRED_CHOICE_POOL_MIN:
+        print(
+            "Rich v21 warning: grounded data supports fewer than the desired "
+            f"{RICH_V18_DESIRED_CHOICE_POOL_MIN} advisor choices. "
+            "Returning only genuinely related advisors.",
+            flush=True,
+        )
+
+    # NEW: repair any script contamination and enforce Arabic-only reasons.
+    matches = _v21_repair_reasons(matches)
+
     return {
         "ranked": [
             {
@@ -6060,7 +6557,7 @@ def handler(job):
                 ),
             }
 
-        return advisory_match_rich_v19(
+        return advisory_match_rich_v21(
             job_input
         )
 
